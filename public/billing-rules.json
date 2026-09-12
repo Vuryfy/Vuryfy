@@ -1,0 +1,6 @@
+{
+  "rollover": false,
+  "topups_refundable": false,
+  "subscription_refundable": false,
+  "routine_notifications": false
+}
