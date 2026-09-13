@@ -1,8 +1,16 @@
 "use client";
-import { useEffect,useState } from "react";
+import { Suspense, useEffect,useState } from "react";
 import { useSearchParams,useRouter } from "next/navigation";
 
-export default function DeepStatus(){
+// NOTE: this page predates the Supabase rewrite — it still calls the old
+// FastAPI backend at localhost:8000 and reads a localStorage token instead
+// of a Supabase session. Deep Investigation is deferred past V1 (see
+// architecture-decisions.md), so this page is not wired up to anything
+// real yet. Wrapped in Suspense below only to satisfy Next.js's
+// useSearchParams()-needs-a-Suspense-boundary requirement for static
+// builds — functional rework happens whenever Deep Investigation is
+// actually built.
+function DeepStatusInner(){
  const params=useSearchParams(); const router=useRouter(); const id=params.get("id"); const [d,setD]=useState<any>(null); const [error,setError]=useState("");
  useEffect(()=>{
   const t=localStorage.getItem("vuryfy_token"); if(!t||!id){router.replace("/");return}
@@ -20,4 +28,8 @@ export default function DeepStatus(){
  <section className="hero status-hero"><p className="eyebrow">INVESTIGATION IN PROGRESS</p><h1>{d?.progress ?? 0}%</h1>
  <p className="sub">{d?.current_step || "Preparing the investigation…"}</p>{error&&<p className="error">{error}</p>}
  <p className="hint">You can keep this screen open while Vuryfy works.</p></section></main>
+}
+
+export default function DeepStatus(){
+ return <Suspense fallback={null}><DeepStatusInner/></Suspense>
 }
