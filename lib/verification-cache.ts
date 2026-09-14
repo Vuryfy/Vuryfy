@@ -16,6 +16,12 @@ import type { QuickCheckEvidence } from "@/lib/quick-check";
 // caller (app/api/verify/route.ts) still creates a fresh per-user
 // `verifications` row and still charges the normal credit on a hit — see
 // that file's comments for why.
+//
+// Shared with Deep Investigation (app/api/deep/route.ts, Sept 14, 2026):
+// these functions are generic over the caller, not Quick-Check-specific.
+// Cache keys never collide between the two modes because engine_version
+// differs ("v1-gemini-tavily" vs "v1-gemini-tavily-deep"), which is one of
+// the three inputs computeCacheKey() hashes over.
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -33,6 +39,10 @@ export interface CachedVerification {
   summary: string;
   key_evidence: QuickCheckEvidence[];
   sources: { title: string; url: string }[];
+  // Deep Investigation only (Sept 14, 2026 addition) — always present on
+  // the underlying verifications row (defaults to '[]'), empty for every
+  // Quick Check row since that pipeline doesn't produce caveats.
+  caveats: string[];
   engine_version: string;
   cached_at: string;
 }
@@ -97,7 +107,7 @@ export async function getCachedVerification(
 
     const { data: original, error: verError } = await admin
       .from("verifications")
-      .select("verdict, confidence, summary, key_evidence, sources, engine_version")
+      .select("verdict, confidence, summary, key_evidence, sources, caveats, engine_version")
       .eq("id", cacheRow.verification_id)
       .maybeSingle();
 
