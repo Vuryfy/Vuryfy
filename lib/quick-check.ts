@@ -16,6 +16,11 @@ import { callStructured } from "@/lib/ai-gateway";
 // the retrieved set is silently dropped rather than trusted. This is the
 // code-enforced half of the anti-hallucination safeguard Part 19 calls
 // for; the system prompt below is the other half.
+//
+// normalizeClaim and ENGINE_VERSION are exported (Sept 14, 2026 addition)
+// so app/api/verify/route.ts and lib/verification-cache.ts can compute the
+// exact same exact-match cache key this module uses internally, without
+// duplicating the normalization logic.
 
 export interface QuickCheckEvidence {
   title: string;
@@ -33,7 +38,7 @@ export interface QuickCheckResult {
   engine_version: string;
 }
 
-const ENGINE_VERSION = "v1-gemini-tavily";
+export const ENGINE_VERSION = "v1-gemini-tavily";
 const VALID_VERDICTS = ["True", "False", "Misleading", "Unverified"];
 
 const VERDICT_SCHEMA = {
@@ -74,7 +79,7 @@ const SYSTEM_PROMPT = `You are Vuryfy's claim-verification engine. You are given
 - summary should be 1-3 concise sentences a general reader can understand, explaining the verdict in plain language.
 Respond with only the requested JSON — no extra commentary, no markdown.`;
 
-function normalizeClaim(raw: string): string {
+export function normalizeClaim(raw: string): string {
   return raw.trim().replace(/\s+/g, " ").slice(0, 2000);
 }
 
