@@ -1,36 +1,24 @@
 import { NextResponse } from "next/server";
 import { createClient as createServerSupabase } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { runQuickCheck } from "@/lib/quick-check";
 
 // Quick Check — Sprint 1 scope: text + link input only (per the locked
 // build order — QR/image/audio/video come one at a time after this).
 //
 // Credit consumption principle (locked, Part 26.4 addition #1): a credit
 // is spent whenever Quick Check COMPLETES with any verdict, including
-// "Unverified" — only genuine infra failures are non-chargeable. So we
-// charge the credit BEFORE calling the AI stub below, and the stub always
-// returns a verdict (never throws for a "the claim was weird" reason).
+// "Unverified" — only genuine infrastructure failures (network errors,
+// provider outages, timeouts) are non-chargeable.
 //
-// ⚠️ STUB: runQuickCheckStub() below does not call any real AI or search
-// provider yet — Gemini/Tavily API keys don't exist in this environment
-// yet. It returns a clearly-labeled placeholder verdict so the rest of
-// the pipeline (auth → credit deduction → DB write → result screen) can
-// be built and tested end-to-end today. Replace its body with a real call
-// through the AI Gateway (Part 11) once those keys are available — the
-// request/response contract below is designed not to need to change when
-// that happens.
-async function runQuickCheckStub(claim: string) {
-  return {
-    verdict: "Unverified",
-    confidence: 0,
-    summary:
-      "Vuryfy's AI verification isn't connected yet — this is a placeholder result so the rest of the app can be tested end-to-end.",
-    key_evidence: [] as { title: string; url: string; publisher?: string; snippet?: string }[],
-    sources: [] as { title: string; url: string }[],
-    engine_version: "v1-stub",
-  };
-}
-
+// To satisfy that without letting a 0-credit user trigger a paid AI/search
+// call, and without a read-then-write race between concurrent requests,
+// the flow below RESERVES the credit up front via the atomic
+// decrement_quick_check() RPC (same as before), runs the real pipeline,
+// and only KEEPS that charge if the pipeline actually returns a verdict.
+// If the pipeline throws (genuine infra failure), the reservation is given
+// back via refund_quick_check() (see supabase/migrations/0002_quick_check_
+// refund.sql) and no verification row is written.
 export async function POST(request: Request) {
   const supabase = await createServerSupabase();
   const {
@@ -80,9 +68,44 @@ export async function POST(request: Request) {
     );
   }
 
-  // Credit is now spent — from here on we owe the user a verdict, per the
-  // locked credit-consumption principle, even if it's "Unverified."
-  const result = await runQuickCheckStub(claim);
+  // Credit is now reserved — from here on we owe the user a verdict (and
+  // keep the charge) if the pipeline completes, or refund it if the
+  // pipeline itself fails for infrastructure reasons.
+  let result;
+  try {
+    result = await runQuickCheck(claim);
+  } catch (err) {
+    console.error("[verify] Quick Check pipeline failed (refunding credit):", err);
+
+    const { data: refunded, error: refundError } = await admin.rpc("refund_quick_check", {
+      p_user_id: user.id,
+    });
+    if (refundError) {
+      // Worst case here: the user was charged for a check that never ran.
+      // Logged loudly since there's no user-facing recovery for this.
+      console.error("[verify] refund_quick_check RPC ALSO failed:", refundError);
+    } else {
+      console.error("[verify] credit refunded, new balance:", refunded);
+    }
+
+    // Audit trail for both the reservation and the refund — every balance
+    // change gets a row, per the locked ledger principle, even when net
+    // effect is zero.
+    await admin.from("credit_transactions").insert([
+      { user_id: user.id, credit_type: "quick_check", amount: -1, reason: "quick_check_reserved" },
+      { user_id: user.id, credit_type: "quick_check", amount: 1, reason: "quick_check_refunded_infra_error" },
+    ]);
+
+    return NextResponse.json(
+      {
+        error: "Verification service is temporarily unavailable. Your credit was not charged — please try again.",
+        ...(process.env.NODE_ENV !== "production"
+          ? { debug: { message: err instanceof Error ? err.message : String(err) } }
+          : {}),
+      },
+      { status: 502 }
+    );
+  }
 
   const { data: verification, error: insertError } = await admin
     .from("verifications")
@@ -150,7 +173,7 @@ export async function POST(request: Request) {
     confidence: verification.confidence,
     explanation: verification.summary,
     evidence: verification.key_evidence,
-    caveats: ["This is a placeholder result — real AI verification isn't connected yet."],
+    sources: verification.sources,
     credits: {
       quick_checks: balance?.quick_checks_remaining ?? 0,
       deep_investigations: balance?.deep_investigations_remaining ?? 0,
