@@ -29,6 +29,13 @@ import { normalizeClaim, type QuickCheckEvidence } from "@/lib/quick-check";
 // quick-check.ts): the reasoning model never handles real URLs, only
 // numeric ids into the retrieved evidence pool; any id outside that pool
 // is silently dropped rather than trusted.
+//
+// "Scam" verdict (Sept 2026 addition): same fifth verdict added to
+// quick-check.ts, added here too so Deep Investigation results get the
+// same distinct red warning treatment (app/result/page.tsx) instead of
+// blending a scam link into a plain "False". Same grounding rule applies
+// unchanged: only choose "Scam" when the retrieved evidence itself
+// supports it, never from a domain merely looking suspicious.
 
 export const DEEP_ENGINE_VERSION = "v1-gemini-tavily-deep";
 
@@ -42,7 +49,7 @@ export interface DeepInvestigationResult {
   engine_version: string;
 }
 
-const VALID_VERDICTS = ["True", "False", "Misleading", "Unverified"];
+const VALID_VERDICTS = ["True", "False", "Misleading", "Unverified", "Scam"];
 const MAX_SUB_QUESTIONS = 4;
 const MAX_EVIDENCE_SOURCES = 12;
 
@@ -94,7 +101,9 @@ const DECOMPOSE_SYSTEM_PROMPT = `You are Vuryfy's Deep Investigation engine. Giv
 Respond with only the requested JSON — no extra commentary, no markdown.`;
 
 const SYNTHESIS_SYSTEM_PROMPT = `You are Vuryfy's Deep Investigation engine, performing a thorough, multi-angle verification of a claim. You are given the claim, the sub-questions this investigation broke it into, and a numbered list of evidence excerpts retrieved across all of those sub-questions. Your job:
-- Decide a verdict: "True", "False", "Misleading", or "Unverified".
+- Decide a verdict: "True", "False", "Misleading", "Unverified", or "Scam".
+- Use "Scam" only when the claim is (or points to, e.g. a link) a scam, phishing attempt, or fraud operation, AND the evidence itself supports that — a scam/phishing report, a fraud-database or blocklist entry, news coverage of the fraud, or a clear pattern of user complaints describing it as a scam, found across the sub-questions this investigation searched. Never choose "Scam" from the link or claim merely looking suspicious, unfamiliar, or unofficial with no such evidence — that case is "Unverified", not "Scam". A confident false accusation is worse than an unresolved one.
+- For anything that is simply incorrect information but not a deliberate scam/fraud attempt, use "False" or "Misleading" as appropriate, not "Scam".
 - You may ONLY use the numbered evidence provided below — never rely on outside knowledge, and never invent a source. Weigh evidence across ALL sub-questions, not just one.
 - contradiction_level should reflect how much the retrieved evidence disagrees with itself (some sources supporting the claim, others contradicting it). High contradiction should generally push toward "Misleading" or "Unverified" rather than a confident True/False.
 - confidence is 0-100 and must reflect how well the evidence actually supports the verdict — weak, single-source, or contradictory evidence should never produce a high confidence score.

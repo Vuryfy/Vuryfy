@@ -21,6 +21,27 @@ import { callStructured } from "@/lib/ai-gateway";
 // so app/api/verify/route.ts and lib/verification-cache.ts can compute the
 // exact same exact-match cache key this module uses internally, without
 // duplicating the normalization logic.
+//
+// "Scam" verdict (Sept 2026 addition): added as a fifth verdict alongside
+// True/False/Misleading/Unverified specifically so a link found to be a
+// phishing site, fraud operation, or scam is surfaced distinctly from a
+// merely-incorrect claim — the result page gives "Scam" its own red
+// warning card (see app/result/page.tsx) rather than blending it into a
+// plain "False". This applies to any claim through this pipeline, not
+// just QR-sourced links — QR just happens to decode into links often, and
+// a scam link is a scam link regardless of how it was submitted.
+//
+// Same grounding rule as every other verdict (Part 19): the model may
+// ONLY pick "Scam" when the retrieved evidence itself says so (a
+// scam/phishing report, a fraud-database entry, news coverage, a pattern
+// of user complaints) — never from the domain merely "looking suspicious"
+// with no supporting evidence. That mirrors the lesson from the real UPI
+// QR test earlier in this project: an unverifiable heuristic guess about
+// legitimacy causes exactly the reputational harm this system exists to
+// avoid. A claim with no scam-specific evidence falls back to Unverified,
+// same as always — a brand-new phishing link with zero web footprint yet
+// won't be caught by an evidence-grounded system, and that's an accepted
+// limitation, not a bug.
 
 export interface QuickCheckEvidence {
   title: string;
@@ -39,7 +60,7 @@ export interface QuickCheckResult {
 }
 
 export const ENGINE_VERSION = "v1-gemini-tavily";
-const VALID_VERDICTS = ["True", "False", "Misleading", "Unverified"];
+const VALID_VERDICTS = ["True", "False", "Misleading", "Unverified", "Scam"];
 
 const VERDICT_SCHEMA = {
   type: "object",
@@ -71,7 +92,9 @@ interface VerdictOutput {
 }
 
 const SYSTEM_PROMPT = `You are Vuryfy's claim-verification engine. You are given a claim and a numbered list of evidence excerpts retrieved by a search system. Your job:
-- Decide a verdict: "True", "False", "Misleading", or "Unverified".
+- Decide a verdict: "True", "False", "Misleading", "Unverified", or "Scam".
+- Use "Scam" only when the claim is (or points to, e.g. a link) a scam, phishing attempt, or fraud operation, AND the evidence itself supports that — a scam/phishing report, a fraud-database or blocklist entry, news coverage of the fraud, or a clear pattern of user complaints describing it as a scam. Never choose "Scam" from the link or claim merely looking suspicious, unfamiliar, or unofficial with no such evidence — that case is "Unverified", not "Scam". A confident false accusation is worse than an unresolved one.
+- For anything that is simply incorrect information but not a deliberate scam/fraud attempt, use "False" or "Misleading" as appropriate, not "Scam".
 - You may ONLY use the numbered evidence provided below — never rely on outside knowledge, and never invent a source. If the evidence is thin, outdated, or contradicts itself, prefer "Unverified" over guessing.
 - confidence is 0-100 and must reflect how well the evidence actually supports the verdict — weak or single-source evidence should never produce a high confidence score.
 - cited_evidence_ids must contain ONLY the bracketed numbers of evidence you actually relied on. Never include a number that wasn't given to you.

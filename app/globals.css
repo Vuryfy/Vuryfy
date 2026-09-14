@@ -23,3 +23,9 @@
 .qr-payment h3{font-size:24px;letter-spacing:-.02em;margin:10px 0 4px}
 .qr-payment .payee-id{font-size:14px;color:#6d747c;word-break:break-word;margin:0 0 4px}
 .qr-payment .caution{font-size:14px;line-height:1.55;color:#575d64;background:#fff;border:1px solid #e5e7ea;border-radius:14px;padding:16px 18px;margin:20px 0 0}
+
+.scam-warning{background:#fdecea;border:1px solid #f3b4ac;border-radius:18px;padding:24px 26px}
+.scam-warning span{font-size:11px;font-weight:700;letter-spacing:.14em;color:#b42318}
+.scam-warning .verdict{color:#b42318;margin:10px 0 4px}
+.scam-warning .confidence{color:#93281e;margin-top:4px}
+.scam-warning .caution{font-size:14px;line-height:1.55;color:#7a281f;background:#fff;border:1px solid #f3b4ac;border-radius:14px;padding:16px 18px;margin:20px 0 0}
