@@ -96,9 +96,15 @@ export async function POST(request: Request) {
       { user_id: user.id, credit_type: "quick_check", amount: 1, reason: "quick_check_refunded_infra_error" },
     ]);
 
+    // User-facing message kept short by request — "Try Again" — since the
+    // AI Gateway now retries transient provider failures (503/429/5xx)
+    // internally before ever surfacing an error here (see ai-gateway.ts).
+    // Reaching this branch means even those retries were exhausted, so a
+    // manual retry is the right next step. Full detail stays in the dev
+    // debug field and the server logs above.
     return NextResponse.json(
       {
-        error: "Verification service is temporarily unavailable. Your credit was not charged — please try again.",
+        error: "Try Again",
         ...(process.env.NODE_ENV !== "production"
           ? { debug: { message: err instanceof Error ? err.message : String(err) } }
           : {}),
