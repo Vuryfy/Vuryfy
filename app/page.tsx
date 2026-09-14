@@ -83,6 +83,12 @@ export default function Home() {
           <Link className="secondary-link" href="/deep">
             Start a Deep Investigation
           </Link>
+          <Link className="secondary-link" href="/verify/qr">
+            Scan a QR Code
+          </Link>
+          <Link className="secondary-link" href="/verify/image">
+            Check a Photo
+          </Link>
         </div>
         <div className="balance-card">
           <div>

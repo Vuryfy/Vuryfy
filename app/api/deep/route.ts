@@ -45,9 +45,9 @@ export async function POST(request: Request) {
   if (claim.length > 10000) {
     return NextResponse.json({ error: "Claim is too long (10,000 character limit)." }, { status: 400 });
   }
-  if (inputType !== "text" && inputType !== "link" && inputType !== "qr") {
+  if (inputType !== "text" && inputType !== "link" && inputType !== "qr" && inputType !== "ocr") {
     return NextResponse.json(
-      { error: `Input type "${inputType}" isn't supported yet — only text, link, and QR so far.` },
+      { error: `Input type "${inputType}" isn't supported yet.` },
       { status: 400 }
     );
   }
