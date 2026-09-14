@@ -32,9 +32,10 @@ import { callStructured } from "@/lib/ai-gateway";
 // a scam link is a scam link regardless of how it was submitted.
 //
 // Same grounding rule as every other verdict (Part 19): the model may
-// ONLY pick "Scam" when the retrieved evidence itself says so (a
-// scam/phishing report, a fraud-database entry, news coverage, a pattern
-// of user complaints) — never from the domain merely "looking suspicious"
+// ONLY pick "Scam" when the retrieved evidence itself specifically names
+// or identifies THIS exact link/domain/entity — a scam/phishing report,
+// a fraud-database entry, news coverage, a pattern of user complaints
+// about it by name — never from the domain merely "looking suspicious"
 // with no supporting evidence. That mirrors the lesson from the real UPI
 // QR test earlier in this project: an unverifiable heuristic guess about
 // legitimacy causes exactly the reputational harm this system exists to
@@ -42,6 +43,18 @@ import { callStructured } from "@/lib/ai-gateway";
 // same as always — a brand-new phishing link with zero web footprint yet
 // won't be caught by an evidence-grounded system, and that's an accepted
 // limitation, not a bug.
+//
+// Prompt tightened Sept 2026 after test-branch testing surfaced a real
+// false-positive: a fabricated domain like
+// "secure-paypal-verification-account-limited.tk" got a confident "Scam"
+// verdict even though no retrieved evidence mentioned that domain at
+// all — the model inferred it from generic "how PayPal phishing scams
+// work" articles plus the claim text's own brand-adjacent, threatening
+// wording. That's exactly the same category of unverifiable-heuristic
+// harm the grounding rule exists to prevent, just reached a different
+// way, so the instruction below now explicitly requires the evidence to
+// be about this specific link/domain/entity, not merely the same general
+// scam category or brand.
 
 export interface QuickCheckEvidence {
   title: string;
@@ -93,7 +106,7 @@ interface VerdictOutput {
 
 const SYSTEM_PROMPT = `You are Vuryfy's claim-verification engine. You are given a claim and a numbered list of evidence excerpts retrieved by a search system. Your job:
 - Decide a verdict: "True", "False", "Misleading", "Unverified", or "Scam".
-- Use "Scam" only when the claim is (or points to, e.g. a link) a scam, phishing attempt, or fraud operation, AND the evidence itself supports that — a scam/phishing report, a fraud-database or blocklist entry, news coverage of the fraud, or a clear pattern of user complaints describing it as a scam. Never choose "Scam" from the link or claim merely looking suspicious, unfamiliar, or unofficial with no such evidence — that case is "Unverified", not "Scam". A confident false accusation is worse than an unresolved one.
+- Use "Scam" only when the evidence specifically names or identifies THIS claim's exact link, domain, or entity as a scam, phishing site, or fraud operation — a report, blocklist entry, news article, or complaint that is actually about this specific link/domain/entity, not merely about the same general category or brand. Evidence that only describes how this type of scam usually works in general (e.g. a generic guide to phishing tactics, or an article about scams impersonating the same brand without naming this exact domain) is NOT sufficient on its own — that case is "Unverified", not "Scam", even if the claim's own wording sounds exactly like a textbook phishing attempt. Never choose "Scam" from the link or claim merely looking suspicious, unfamiliar, unofficial, or brand-adjacent with no evidence specifically about it — a confident false accusation is worse than an unresolved one.
 - For anything that is simply incorrect information but not a deliberate scam/fraud attempt, use "False" or "Misleading" as appropriate, not "Scam".
 - You may ONLY use the numbered evidence provided below — never rely on outside knowledge, and never invent a source. If the evidence is thin, outdated, or contradicts itself, prefer "Unverified" over guessing.
 - confidence is 0-100 and must reflect how well the evidence actually supports the verdict — weak or single-source evidence should never produce a high confidence score.

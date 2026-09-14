@@ -34,8 +34,12 @@ import { normalizeClaim, type QuickCheckEvidence } from "@/lib/quick-check";
 // quick-check.ts, added here too so Deep Investigation results get the
 // same distinct red warning treatment (app/result/page.tsx) instead of
 // blending a scam link into a plain "False". Same grounding rule applies
-// unchanged: only choose "Scam" when the retrieved evidence itself
-// supports it, never from a domain merely looking suspicious.
+// unchanged, including the Sept 2026 tightening (see quick-check.ts for
+// the full story): the evidence must specifically name or identify this
+// exact link/domain/entity, not just the same general scam category or
+// brand — testing surfaced a fabricated PayPal-phishing-style domain
+// getting a confident "Scam" from generic "how PayPal phishing works"
+// evidence alone, with nothing about that specific domain.
 
 export const DEEP_ENGINE_VERSION = "v1-gemini-tavily-deep";
 
@@ -102,7 +106,7 @@ Respond with only the requested JSON — no extra commentary, no markdown.`;
 
 const SYNTHESIS_SYSTEM_PROMPT = `You are Vuryfy's Deep Investigation engine, performing a thorough, multi-angle verification of a claim. You are given the claim, the sub-questions this investigation broke it into, and a numbered list of evidence excerpts retrieved across all of those sub-questions. Your job:
 - Decide a verdict: "True", "False", "Misleading", "Unverified", or "Scam".
-- Use "Scam" only when the claim is (or points to, e.g. a link) a scam, phishing attempt, or fraud operation, AND the evidence itself supports that — a scam/phishing report, a fraud-database or blocklist entry, news coverage of the fraud, or a clear pattern of user complaints describing it as a scam, found across the sub-questions this investigation searched. Never choose "Scam" from the link or claim merely looking suspicious, unfamiliar, or unofficial with no such evidence — that case is "Unverified", not "Scam". A confident false accusation is worse than an unresolved one.
+- Use "Scam" only when the evidence specifically names or identifies THIS claim's exact link, domain, or entity as a scam, phishing site, or fraud operation — a report, blocklist entry, news article, or complaint that is actually about this specific link/domain/entity, found across the sub-questions this investigation searched, not merely about the same general category or brand. Evidence that only describes how this type of scam usually works in general (e.g. a generic guide to phishing tactics, or an article about scams impersonating the same brand without naming this exact domain) is NOT sufficient on its own — that case is "Unverified", not "Scam", even if the claim's own wording sounds exactly like a textbook phishing attempt. Never choose "Scam" from the link or claim merely looking suspicious, unfamiliar, unofficial, or brand-adjacent with no evidence specifically about it — a confident false accusation is worse than an unresolved one.
 - For anything that is simply incorrect information but not a deliberate scam/fraud attempt, use "False" or "Misleading" as appropriate, not "Scam".
 - You may ONLY use the numbered evidence provided below — never rely on outside knowledge, and never invent a source. Weigh evidence across ALL sub-questions, not just one.
 - contradiction_level should reflect how much the retrieved evidence disagrees with itself (some sources supporting the claim, others contradicting it). High contradiction should generally push toward "Misleading" or "Unverified" rather than a confident True/False.
