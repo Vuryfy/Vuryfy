@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 
 type Result = {
   id: string;
+  mode?: "quick" | "deep";
   verdict: string;
   confidence: number;
   explanation: string;
@@ -25,16 +26,22 @@ export default function ResultPage() {
 
   if (!r) return null;
 
+  // mode is absent on results saved before this field existed (an old
+  // sessionStorage entry surviving a hard refresh) — quick is the correct
+  // fallback since Deep Investigation didn't exist before mode was added.
+  const isDeep = r.mode === "deep";
+  const newCheckHref = isDeep ? "/deep" : "/verify";
+
   return (
     <main className="shell narrow">
       <nav>
-        <button className="back" onClick={() => router.push("/verify")}>
+        <button className="back" onClick={() => router.push(newCheckHref)}>
           ← New check
         </button>
         <div className="credits">Credits · {r.credits.total}</div>
       </nav>
       <section className="result">
-        <p className="eyebrow">QUICK CHECK RESULT</p>
+        <p className="eyebrow">{isDeep ? "DEEP INVESTIGATION RESULT" : "QUICK CHECK RESULT"}</p>
         <div className="verdict">{r.verdict}</div>
         <div className="confidence">Confidence · {r.confidence}%</div>
         <div className="claim">
@@ -72,7 +79,7 @@ export default function ResultPage() {
           >
             Share result
           </button>
-          <button className="secondary" onClick={() => router.push("/verify")}>
+          <button className="secondary" onClick={() => router.push(newCheckHref)}>
             Verify another
           </button>
         </div>

@@ -184,6 +184,7 @@ export async function POST(request: Request) {
 
   return NextResponse.json({
     id: verification.id,
+    mode: "deep",
     claim: verification.claim_text,
     verdict: verification.verdict,
     confidence: verification.confidence,
