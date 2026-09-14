@@ -1,0 +1,213 @@
+import { search, type SearchResult } from "@/lib/search-gateway";
+import { callStructured } from "@/lib/ai-gateway";
+import { normalizeClaim, type QuickCheckEvidence } from "@/lib/quick-check";
+
+// Deep Investigation pipeline (Part 11 routing logic + Part 26.5, LOCKED
+// shape carried over from the old FastAPI reference implementation):
+// cheap model (decompose) -> search/evidence collection (per sub-question,
+// in parallel) -> reasoning-tier model (synthesize + contradiction
+// analysis) -> verdict.
+//
+// Architecture note (Sept 14, 2026): the previously-open question of how
+// to run a long-lived job on Vercel's serverless functions turned out not
+// to apply here. Investigated a background-job/polling architecture (the
+// old FastAPI reference used BackgroundTasks + a status-polling endpoint,
+// and Vercel's Fluid Compute now gives Hobby-plan functions a 300s
+// duration budget, confirmed enabled on this project, which would have
+// made an after()-based background job workable with no new
+// infrastructure) -- but the user wants Deep Investigation to complete in
+// well under 30 seconds, not minutes. A 2-AI-call, parallel-search pipeline
+// comfortably fits that target, so Deep Investigation runs as a single
+// synchronous request/response, exactly like Quick Check's shape (see
+// app/api/deep/route.ts) -- no job table, no polling, no background
+// execution. This also means the schema/job-model plumbing the old
+// reference implementation had (DeepInvestigation job rows with
+// status/current_step/progress) was deliberately NOT carried over; only
+// the final result shape was.
+//
+// Evidence grounding (Part 19, same anti-hallucination safeguard as
+// quick-check.ts): the reasoning model never handles real URLs, only
+// numeric ids into the retrieved evidence pool; any id outside that pool
+// is silently dropped rather than trusted.
+
+export const DEEP_ENGINE_VERSION = "v1-gemini-tavily-deep";
+
+export interface DeepInvestigationResult {
+  verdict: string;
+  confidence: number;
+  summary: string;
+  key_evidence: QuickCheckEvidence[];
+  sources: { title: string; url: string }[];
+  caveats: string[];
+  engine_version: string;
+}
+
+const VALID_VERDICTS = ["True", "False", "Misleading", "Unverified"];
+const MAX_SUB_QUESTIONS = 4;
+const MAX_EVIDENCE_SOURCES = 12;
+
+const DECOMPOSE_SCHEMA = {
+  type: "object",
+  properties: {
+    sub_questions: { type: "array", items: { type: "string" } },
+  },
+  required: ["sub_questions"],
+};
+
+const SYNTHESIS_SCHEMA = {
+  type: "object",
+  properties: {
+    verdict: { type: "string", enum: VALID_VERDICTS },
+    confidence: { type: "integer" },
+    summary: { type: "string" },
+    contradiction_level: { type: "string", enum: ["none", "low", "medium", "high"] },
+    cited_evidence_ids: { type: "array", items: { type: "integer" } },
+    missing_information: { type: "array", items: { type: "string" } },
+    caveats: { type: "array", items: { type: "string" } },
+  },
+  required: [
+    "verdict",
+    "confidence",
+    "summary",
+    "contradiction_level",
+    "cited_evidence_ids",
+    "missing_information",
+    "caveats",
+  ],
+};
+
+interface DecomposeOutput {
+  sub_questions: string[];
+}
+
+interface SynthesisOutput {
+  verdict: string;
+  confidence: number;
+  summary: string;
+  contradiction_level: string;
+  cited_evidence_ids: number[];
+  missing_information: string[];
+  caveats: string[];
+}
+
+const DECOMPOSE_SYSTEM_PROMPT = `You are Vuryfy's Deep Investigation engine. Given a claim, break it down into 1-${MAX_SUB_QUESTIONS} focused sub-questions that, if each were answered with evidence, would let someone determine whether the claim is true, false, or misleading. Each sub-question should be a specific, searchable question — not just a restatement of the claim. If the claim is already simple and doesn't benefit from decomposition, return a single sub-question that is the core factual question being asked.
+Respond with only the requested JSON — no extra commentary, no markdown.`;
+
+const SYNTHESIS_SYSTEM_PROMPT = `You are Vuryfy's Deep Investigation engine, performing a thorough, multi-angle verification of a claim. You are given the claim, the sub-questions this investigation broke it into, and a numbered list of evidence excerpts retrieved across all of those sub-questions. Your job:
+- Decide a verdict: "True", "False", "Misleading", or "Unverified".
+- You may ONLY use the numbered evidence provided below — never rely on outside knowledge, and never invent a source. Weigh evidence across ALL sub-questions, not just one.
+- contradiction_level should reflect how much the retrieved evidence disagrees with itself (some sources supporting the claim, others contradicting it). High contradiction should generally push toward "Misleading" or "Unverified" rather than a confident True/False.
+- confidence is 0-100 and must reflect how well the evidence actually supports the verdict — weak, single-source, or contradictory evidence should never produce a high confidence score.
+- cited_evidence_ids must contain ONLY the bracketed numbers of evidence you actually relied on. Never include a number that wasn't given to you.
+- missing_information should list what additional evidence would strengthen this verdict, if anything is missing.
+- caveats should list any important limitations, nuances, or context a reader should know even after the verdict (for example: the figure changes over time, sources disagree on specifics but agree on the general claim, the claim is technically true but misleading in context). Leave empty if there are none.
+- summary should be 2-4 concise sentences a general reader can understand, explaining the verdict and the reasoning behind it in plain language — more thorough than a one-line Quick Check summary, since this is a Deep Investigation.
+Respond with only the requested JSON — no extra commentary, no markdown.`;
+
+function buildEvidenceBlock(results: SearchResult[]): string {
+  return results
+    .map((r, i) => `[${i + 1}] ${r.title}\nSource: ${r.source}\nURL: ${r.url}\nExcerpt: ${r.snippet}`)
+    .join("\n\n");
+}
+
+export async function runDeepInvestigation(claimRaw: string): Promise<DeepInvestigationResult> {
+  const claim = normalizeClaim(claimRaw);
+
+  // Step 1: decompose into sub-questions (cheap tier). Falls back to
+  // treating the whole claim as a single sub-question if the model
+  // returns nothing usable — decomposition failing outright should never
+  // block the investigation.
+  let subQuestions: string[] = [claim];
+  try {
+    const { data } = await callStructured<DecomposeOutput>({
+      tier: "cheap",
+      systemPrompt: DECOMPOSE_SYSTEM_PROMPT,
+      userPrompt: `Claim to investigate:\n"${claim}"`,
+      responseSchema: DECOMPOSE_SCHEMA,
+    });
+    const cleaned = Array.isArray(data.sub_questions)
+      ? data.sub_questions.filter((q) => typeof q === "string" && q.trim().length > 0).slice(0, MAX_SUB_QUESTIONS)
+      : [];
+    if (cleaned.length > 0) subQuestions = cleaned;
+  } catch (err) {
+    console.error("[deep-investigation] decompose step failed, falling back to single-question search:", err);
+  }
+
+  // Step 2: search each sub-question in parallel, merge + dedupe by URL,
+  // cap total evidence pool size (keeps the synthesis prompt bounded and
+  // the whole pipeline fast). A sub-question whose search fails just
+  // contributes no evidence rather than failing the whole investigation.
+  const perQuestionResults = await Promise.all(
+    subQuestions.map((q) =>
+      search(q, { maxResults: 5 }).catch((err) => {
+        console.error("[deep-investigation] search failed for sub-question:", q, err);
+        return [] as SearchResult[];
+      })
+    )
+  );
+
+  const seen = new Set<string>();
+  const merged: SearchResult[] = [];
+  outer: for (const results of perQuestionResults) {
+    for (const r of results) {
+      if (!r.url || seen.has(r.url)) continue;
+      seen.add(r.url);
+      merged.push(r);
+      if (merged.length >= MAX_EVIDENCE_SOURCES) break outer;
+    }
+  }
+
+  const sources = merged.map((r) => ({ title: r.title, url: r.url }));
+
+  // Evidence threshold, same principle as Quick Check (Part 26.4): don't
+  // manufacture a confident verdict from nothing.
+  if (merged.length === 0) {
+    return {
+      verdict: "Unverified",
+      confidence: 0,
+      summary:
+        "No evidence could be found across any of the angles this investigation looked into. Try rephrasing the claim or adding more specific detail.",
+      key_evidence: [],
+      sources: [],
+      caveats: [],
+      engine_version: DEEP_ENGINE_VERSION,
+    };
+  }
+
+  // Step 3: reasoning-tier synthesis across all collected evidence.
+  const evidenceBlock = buildEvidenceBlock(merged);
+  const questionsBlock = subQuestions.map((q, i) => `${i + 1}. ${q}`).join("\n");
+  const userPrompt = `Claim to investigate:\n"${claim}"\n\nSub-questions this investigation broke the claim into:\n${questionsBlock}\n\nEvidence:\n${evidenceBlock}`;
+
+  const { data } = await callStructured<SynthesisOutput>({
+    tier: "reasoning",
+    systemPrompt: SYNTHESIS_SYSTEM_PROMPT,
+    userPrompt,
+    responseSchema: SYNTHESIS_SCHEMA,
+  });
+
+  // Code-enforced grounding (Part 19): only trust cited ids that actually
+  // point into the retrieved evidence pool.
+  const citedIds = Array.isArray(data.cited_evidence_ids) ? data.cited_evidence_ids : [];
+  const keyEvidence: QuickCheckEvidence[] = citedIds
+    .filter((id) => Number.isInteger(id) && id >= 1 && id <= merged.length)
+    .map((id) => {
+      const r = merged[id - 1];
+      return { title: r.title, url: r.url, publisher: r.source, snippet: r.snippet };
+    });
+
+  const verdict = VALID_VERDICTS.includes(data.verdict) ? data.verdict : "Unverified";
+  const confidence = Number.isFinite(data.confidence) ? Math.max(0, Math.min(100, Math.round(data.confidence))) : 0;
+  const summary = typeof data.summary === "string" && data.summary.trim() ? data.summary.trim() : "No explanation was returned.";
+  const caveats = Array.isArray(data.caveats) ? data.caveats.filter((c) => typeof c === "string" && c.trim().length > 0) : [];
+
+  return {
+    verdict,
+    confidence,
+    summary,
+    key_evidence: keyEvidence,
+    sources,
+    caveats,
+    engine_version: DEEP_ENGINE_VERSION,
+  };
+}

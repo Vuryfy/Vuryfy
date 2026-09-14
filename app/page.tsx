@@ -80,9 +80,9 @@ export default function Home() {
           <Link className="primary-link" href="/verify">
             Start a Quick Check
           </Link>
-          <button className="secondary-link" disabled title="Coming soon — not built yet">
-            Deep Investigation (coming soon)
-          </button>
+          <Link className="secondary-link" href="/deep">
+            Start a Deep Investigation
+          </Link>
         </div>
         <div className="balance-card">
           <div>
