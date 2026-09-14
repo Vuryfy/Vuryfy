@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 
 export default function VerifyPage() {
@@ -61,6 +62,9 @@ export default function VerifyPage() {
           </button>
         </div>
         {error && <p className="error">{error}</p>}
+        <p className="hint">
+          Have a QR code instead? <Link href="/verify/qr">Scan it</Link>
+        </p>
       </section>
     </main>
   );

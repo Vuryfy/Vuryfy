@@ -32,6 +32,13 @@ export default function ResultPage() {
   const isDeep = r.mode === "deep";
   const newCheckHref = isDeep ? "/deep" : "/verify";
 
+  // "Scam" verdict (Sept 2026 addition, see lib/quick-check.ts and
+  // lib/deep-investigation.ts): gets its own red warning card instead of
+  // blending into the plain verdict text every other verdict uses, so a
+  // scam link doesn't read as just another "False". Applies to any claim
+  // through either pipeline, not just QR-sourced ones.
+  const isScam = r.verdict === "Scam";
+
   return (
     <main className="shell narrow">
       <nav>
@@ -42,8 +49,22 @@ export default function ResultPage() {
       </nav>
       <section className="result">
         <p className="eyebrow">{isDeep ? "DEEP INVESTIGATION RESULT" : "QUICK CHECK RESULT"}</p>
-        <div className="verdict">{r.verdict}</div>
-        <div className="confidence">Confidence · {r.confidence}%</div>
+        {isScam ? (
+          <div className="scam-warning">
+            <span>⚠ SCAM WARNING</span>
+            <div className="verdict">Scam</div>
+            <div className="confidence">Confidence · {r.confidence}%</div>
+            <p className="caution">
+              This was flagged as a scam based on the evidence found — don&apos;t click through,
+              pay, or share personal details with it. Check the evidence below for what we found.
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="verdict">{r.verdict}</div>
+            <div className="confidence">Confidence · {r.confidence}%</div>
+          </>
+        )}
         <div className="claim">
           <span>CLAIM</span>
           <p>{r.claim}</p>

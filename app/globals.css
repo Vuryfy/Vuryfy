@@ -12,3 +12,20 @@
 .home-links{display:flex;gap:20px;align-items:center;margin-top:24px}.home-links a{color:#565d65;text-decoration:none;font-size:14px}.text-button{width:auto;height:auto;margin:0;padding:0;background:transparent;color:#565d65;font-weight:500}
 .status-hero h1{font-size:clamp(64px,10vw,110px)}.billing{min-height:65vh}.billing>button{width:min(420px,100%);margin:10px auto}.topup-box{width:min(620px,100%);margin-top:30px;padding:22px;border:1px solid #e5e7ea;background:#fff;border-radius:18px}.topup-box h2{margin:0 0 6px}.topup-box p{color:#6d747c}.topup-box button{width:auto;padding:0 18px}
 @media(max-width:600px){.home-actions{width:100%;flex-direction:column}.home-actions>*{width:100%}.balance-card{width:100%}.balance-card div{min-width:0;flex:1;padding:14px 8px}.home-links{flex-wrap:wrap;justify-content:center}}
+
+.hint a{color:#17191c;font-weight:600;text-decoration:underline}
+.qr-file-input{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.qr-decoded{border-top:1px solid #e5e7ea;margin-top:36px;padding-top:20px}
+.qr-decoded span{font-size:11px;font-weight:700;letter-spacing:.14em;color:#747a81}
+.qr-decoded p{font-size:18px;line-height:1.6;margin:10px 0;word-break:break-word}
+.qr-payment{border-top:1px solid #e5e7ea;margin-top:36px;padding-top:20px}
+.qr-payment span{font-size:11px;font-weight:700;letter-spacing:.14em;color:#747a81}
+.qr-payment h3{font-size:24px;letter-spacing:-.02em;margin:10px 0 4px}
+.qr-payment .payee-id{font-size:14px;color:#6d747c;word-break:break-word;margin:0 0 4px}
+.qr-payment .caution{font-size:14px;line-height:1.55;color:#575d64;background:#fff;border:1px solid #e5e7ea;border-radius:14px;padding:16px 18px;margin:20px 0 0}
+
+.scam-warning{background:#fdecea;border:1px solid #f3b4ac;border-radius:18px;padding:24px 26px}
+.scam-warning span{font-size:11px;font-weight:700;letter-spacing:.14em;color:#b42318}
+.scam-warning .verdict{color:#b42318;margin:10px 0 4px}
+.scam-warning .confidence{color:#93281e;margin-top:4px}
+.scam-warning .caution{font-size:14px;line-height:1.55;color:#7a281f;background:#fff;border:1px solid #f3b4ac;border-radius:14px;padding:16px 18px;margin:20px 0 0}

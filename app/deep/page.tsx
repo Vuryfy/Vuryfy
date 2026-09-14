@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 
 // Rewritten Sept 14, 2026 to replace the old pre-Supabase-rewrite version
@@ -13,6 +14,11 @@ import { createClient } from "@/lib/supabase/client";
 // a longer expected wait (Deep Investigation runs a heavier pipeline, so
 // the button/placeholder text set that expectation rather than implying
 // it's as fast as a Quick Check).
+//
+// QR hint added Sept 2026, mirroring app/verify/page.tsx: the QR scan
+// screen (app/verify/qr/page.tsx) now offers both Quick Check and Deep
+// Investigation from the same decoded-claim screen, so both text-entry
+// pages surface it as an alternative entry point, not just Quick Check's.
 export default function DeepPage() {
   const router = useRouter();
   const supabase = createClient();
@@ -75,6 +81,9 @@ export default function DeepPage() {
           </button>
         </div>
         {error && <p className="error">{error}</p>}
+        <p className="hint">
+          Have a QR code instead? <Link href="/verify/qr">Scan it</Link>
+        </p>
       </section>
     </main>
   );
