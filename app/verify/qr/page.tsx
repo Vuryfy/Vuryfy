@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { decodeQrFromFile } from "@/lib/decode-qr";
+import { detectPaymentLink, type PaymentLinkInfo } from "@/lib/detect-payment-link";
 
 // QR Quick Check — the next step in the locked media-type build order
 // (text + link, then QR, then image, then audio/video). The QR image is
@@ -11,12 +12,23 @@ import { decodeQrFromFile } from "@/lib/decode-qr";
 // /api/verify path a typed claim uses — just with input_type: "qr"
 // instead of "text"/"link". No new backend pipeline, no image
 // upload/storage: this reuses everything Quick Check already has.
+//
+// Payment QR codes (UPI upi://pay?... links, etc.) are a deliberate
+// exception, added the same day after testing against a real UPI QR: they
+// never reach /api/verify at all. See lib/detect-payment-link.ts for why —
+// Quick Check's search-based pipeline has no way to confirm who controls a
+// payment ID, so running one through it produces a misleading low-
+// confidence "Unverified" for legitimate and fraudulent payees alike.
+// Detected payment links get an informational card instead — payee
+// name/ID surfaced plainly with a caution note, no verdict, no credit
+// charged.
 export default function VerifyQrPage() {
   const router = useRouter();
   const supabase = createClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [decoding, setDecoding] = useState(false);
   const [decoded, setDecoded] = useState<string | null>(null);
+  const [paymentInfo, setPaymentInfo] = useState<PaymentLinkInfo | null>(null);
   const [decodeError, setDecodeError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
@@ -31,12 +43,18 @@ export default function VerifyQrPage() {
     setDecoding(true);
     setDecodeError("");
     setDecoded(null);
+    setPaymentInfo(null);
     try {
       const result = await decodeQrFromFile(file);
       if (!result) {
         setDecodeError(
           "Couldn't find a QR code in that image. Try a clearer, well-lit photo where the code fills more of the frame."
         );
+        return;
+      }
+      const payment = detectPaymentLink(result);
+      if (payment) {
+        setPaymentInfo(payment);
       } else {
         setDecoded(result);
       }
@@ -70,6 +88,7 @@ export default function VerifyQrPage() {
 
   function reset() {
     setDecoded(null);
+    setPaymentInfo(null);
     setDecodeError("");
     setSubmitError("");
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -91,7 +110,7 @@ export default function VerifyQrPage() {
           the code is sent to us — the photo itself never leaves your device.
         </p>
 
-        {!decoded && (
+        {!decoded && !paymentInfo && (
           <>
             <input
               ref={fileInputRef}
@@ -110,6 +129,25 @@ export default function VerifyQrPage() {
             </label>
             {decodeError && <p className="error">{decodeError}</p>}
           </>
+        )}
+
+        {paymentInfo && (
+          <div className="qr-payment">
+            <span>THIS IS A PAYMENT QR CODE</span>
+            <h3>{paymentInfo.payeeName || "Unnamed payee"}</h3>
+            {paymentInfo.payeeId && <p className="payee-id">{paymentInfo.payeeId}</p>}
+            <p className="caution">
+              Vuryfy can&apos;t verify who actually controls a payment ID from a QR code alone —
+              that isn&apos;t something a web search can confirm. Before paying, make sure the
+              name above matches who you intend to pay, and confirm directly with them if
+              you&apos;re unsure.
+            </p>
+            <div className="result-actions">
+              <button className="secondary" onClick={reset}>
+                Scan another
+              </button>
+            </div>
+          </div>
         )}
 
         {decoded && (
