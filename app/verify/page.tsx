@@ -65,6 +65,9 @@ export default function VerifyPage() {
         <p className="hint">
           Have a QR code instead? <Link href="/verify/qr">Scan it</Link>
         </p>
+        <p className="hint">
+          Got a photo? <Link href="/verify/image">Check it</Link>
+        </p>
       </section>
     </main>
   );

@@ -20,11 +20,27 @@
 // seeing an error or needing to click Verify again. This is layered
 // underneath (wraps) the existing malformed-JSON retry, which is a
 // separate concern (bad output, not a failed request).
+//
+// Image input (added for image Quick Check/Deep Investigation, Sept 2026):
+// Gemini's generateContent endpoint accepts inline image data as an
+// additional `parts` entry alongside the text prompt in the same request —
+// no separate vision endpoint or model. callStructured() now accepts an
+// optional imageParts array for exactly this, used only by
+// lib/image-analysis.ts's photo-as-claim pipeline; every other caller
+// (quick-check.ts, deep-investigation.ts) is unaffected and keeps sending
+// text-only requests. Also accepts an optional timeoutMs override, since a
+// vision call over a real photo can reasonably take a little longer than a
+// short text-evaluation call — still bounded, never unbounded.
 
 const GEMINI_MODEL = "gemini-3.1-flash-lite";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 export type ModelTier = "cheap" | "reasoning";
+
+export interface ImagePart {
+  mimeType: string;
+  data: string; // base64, no "data:...;base64," prefix
+}
 
 export interface StructuredCallParams {
   tier: ModelTier;
@@ -32,6 +48,8 @@ export interface StructuredCallParams {
   userPrompt: string;
   responseSchema: Record<string, unknown>;
   temperature?: number;
+  imageParts?: ImagePart[];
+  timeoutMs?: number;
 }
 
 export interface StructuredCallResult<T> {
@@ -80,6 +98,15 @@ function modelForTier(_tier: ModelTier): string {
 async function attemptCall<T>(params: StructuredCallParams, apiKey: string): Promise<StructuredCallResult<T>> {
   void modelForTier(params.tier); // reserved for when tiers diverge onto different models
 
+  // Image parts, when present, go first in the parts array (Gemini's own
+  // examples do this consistently) followed by the text prompt — this is a
+  // convention, not a hard requirement, but keeping it consistent avoids a
+  // class of "does part order matter" debugging later.
+  const parts: Record<string, unknown>[] = [
+    ...(params.imageParts ?? []).map((p) => ({ inlineData: { mimeType: p.mimeType, data: p.data } })),
+    { text: params.userPrompt },
+  ];
+
   let response: Response;
   try {
     response = await fetch(GEMINI_ENDPOINT, {
@@ -89,7 +116,7 @@ async function attemptCall<T>(params: StructuredCallParams, apiKey: string): Pro
         "x-goog-api-key": apiKey,
       },
       body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: params.userPrompt }] }],
+        contents: [{ role: "user", parts }],
         systemInstruction: { role: "system", parts: [{ text: params.systemPrompt }] },
         generationConfig: {
           temperature: params.temperature ?? 0.2,
@@ -98,8 +125,10 @@ async function attemptCall<T>(params: StructuredCallParams, apiKey: string): Pro
         },
       }),
       // Quick Check targets ~5-15s total (Part 26.4) — bound the AI call so
-      // a hung request can't block the whole request indefinitely.
-      signal: AbortSignal.timeout(20_000),
+      // a hung request can't block the whole request indefinitely. Callers
+      // doing heavier work (e.g. a reasoning-tier vision call) can pass a
+      // longer timeoutMs; still always bounded, never unbounded.
+      signal: AbortSignal.timeout(params.timeoutMs ?? 20_000),
     });
   } catch (err) {
     throw new AiGatewayError("Gemini request failed (network/timeout)", err);

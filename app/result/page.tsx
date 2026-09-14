@@ -12,6 +12,12 @@ type Result = {
   evidence: { title: string; url: string; publisher?: string; snippet?: string }[];
   caveats: string[];
   credits: { total: number; quick_checks: number; deep_investigations: number };
+  // Client-side routing hint only, not something the API returns — set by
+  // the page that submitted the check (added for the image page, Sept
+  // 2026) so "verify another" can send the user back to the right form
+  // even when that isn't simply /verify or /deep. Absent on every other
+  // result, which falls back to the mode-based logic below unchanged.
+  return_to?: string;
 };
 
 export default function ResultPage() {
@@ -30,7 +36,7 @@ export default function ResultPage() {
   // sessionStorage entry surviving a hard refresh) — quick is the correct
   // fallback since Deep Investigation didn't exist before mode was added.
   const isDeep = r.mode === "deep";
-  const newCheckHref = isDeep ? "/deep" : "/verify";
+  const newCheckHref = r.return_to || (isDeep ? "/deep" : "/verify");
 
   // "Scam" verdict (Sept 2026 addition, see lib/quick-check.ts and
   // lib/deep-investigation.ts): gets its own red warning card instead of

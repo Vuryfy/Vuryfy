@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import Link from "next/link";
 import { decodeQrFromFile } from "@/lib/decode-qr";
 import { detectPaymentLink, type PaymentLinkInfo } from "@/lib/detect-payment-link";
 
@@ -140,6 +141,9 @@ export default function VerifyQrPage() {
               {decoding ? "Reading…" : "Choose or take a photo"}
             </label>
             {decodeError && <p className="error">{decodeError}</p>}
+            <p className="hint">
+              Got a regular photo instead of a QR code? <Link href="/verify/image">Check it</Link>
+            </p>
           </>
         )}
 

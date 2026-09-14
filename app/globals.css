@@ -29,3 +29,5 @@
 .scam-warning .verdict{color:#b42318;margin:10px 0 4px}
 .scam-warning .confidence{color:#93281e;margin-top:4px}
 .scam-warning .caution{font-size:14px;line-height:1.55;color:#7a281f;background:#fff;border:1px solid #f3b4ac;border-radius:14px;padding:16px 18px;margin:20px 0 0}
+
+.context-textarea{min-height:90px}
