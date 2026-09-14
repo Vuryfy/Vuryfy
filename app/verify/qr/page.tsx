@@ -15,13 +15,23 @@ import { detectPaymentLink, type PaymentLinkInfo } from "@/lib/detect-payment-li
 //
 // Payment QR codes (UPI upi://pay?... links, etc.) are a deliberate
 // exception, added the same day after testing against a real UPI QR: they
-// never reach /api/verify at all. See lib/detect-payment-link.ts for why —
-// Quick Check's search-based pipeline has no way to confirm who controls a
-// payment ID, so running one through it produces a misleading low-
-// confidence "Unverified" for legitimate and fraudulent payees alike.
-// Detected payment links get an informational card instead — payee
-// name/ID surfaced plainly with a caution note, no verdict, no credit
-// charged.
+// never reach /api/verify (or /api/deep) at all. See lib/detect-payment-link.ts
+// for why — neither pipeline has a way to confirm who controls a payment
+// ID, so running one through either produces a misleading low-confidence
+// result for legitimate and fraudulent payees alike. Detected payment
+// links get an informational card instead — payee name/ID surfaced
+// plainly with a caution note, no verdict, no credit charged, for either
+// mode.
+//
+// Decoded (non-payment) claims offer BOTH Quick Check and Deep
+// Investigation from the same screen, rather than QR having its own
+// mode-specific entry point. This is a deliberate standing pattern (Sept
+// 2026): whatever a claim's source — typed, QR, and any future input type
+// (image, audio/video) — the two verification modes should stay two
+// buttons on one confirm screen, not two separate capture flows. It keeps
+// the payment-QR guard, the decode/extract step, and any per-input-type
+// UI in exactly one place per input type, while both /api/verify and
+// /api/deep stay reachable from it.
 export default function VerifyQrPage() {
   const router = useRouter();
   const supabase = createClient();
@@ -30,7 +40,7 @@ export default function VerifyQrPage() {
   const [decoded, setDecoded] = useState<string | null>(null);
   const [paymentInfo, setPaymentInfo] = useState<PaymentLinkInfo | null>(null);
   const [decodeError, setDecodeError] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  const [submitting, setSubmitting] = useState<"quick" | "deep" | null>(null);
   const [submitError, setSubmitError] = useState("");
 
   useEffect(() => {
@@ -65,24 +75,25 @@ export default function VerifyQrPage() {
     }
   }
 
-  async function confirm() {
+  async function confirm(mode: "quick" | "deep") {
     if (!decoded) return;
-    setSubmitting(true);
+    setSubmitting(mode);
     setSubmitError("");
     try {
-      const r = await fetch("/api/verify", {
+      const endpoint = mode === "quick" ? "/api/verify" : "/api/deep";
+      const r = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ claim: decoded, input_type: "qr" }),
       });
       const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "Verification failed");
+      if (!r.ok) throw new Error(d.error || (mode === "quick" ? "Verification failed" : "Investigation failed"));
       sessionStorage.setItem("vuryfy_result", JSON.stringify(d));
       router.push(`/result?id=${d.id}`);
     } catch (e: any) {
       setSubmitError(e.message);
     } finally {
-      setSubmitting(false);
+      setSubmitting(null);
     }
   }
 
@@ -97,17 +108,18 @@ export default function VerifyQrPage() {
   return (
     <main className="shell narrow">
       <nav>
-        <button className="back" onClick={() => router.push("/verify")}>
+        <button className="back" onClick={() => router.push("/")}>
           ← Back
         </button>
         <div className="credits">Credits</div>
       </nav>
       <section className="verify">
-        <p className="eyebrow">QUICK CHECK · QR CODE</p>
+        <p className="eyebrow">QR CODE</p>
         <h1>Scan a QR code.</h1>
         <p className="sub">
-          Upload a photo of a QR code and we&apos;ll check what it points to. Only the text inside
-          the code is sent to us — the photo itself never leaves your device.
+          Upload a photo of a QR code and choose Quick Check or Deep Investigation for what it
+          points to. Only the text inside the code is sent to us — the photo itself never leaves
+          your device.
         </p>
 
         {!decoded && !paymentInfo && (
@@ -154,12 +166,19 @@ export default function VerifyQrPage() {
           <div className="qr-decoded">
             <span>WE FOUND THIS IN YOUR QR CODE</span>
             <p>{decoded}</p>
+            <p className="hint">
+              Quick Check gives a fast answer. Deep Investigation researches it more thoroughly
+              and takes longer.
+            </p>
             <div className="result-actions">
-              <button className="secondary" onClick={reset} disabled={submitting}>
+              <button className="secondary" onClick={reset} disabled={!!submitting}>
                 Scan another
               </button>
-              <button onClick={confirm} disabled={submitting}>
-                {submitting ? "Checking…" : "Verify this"}
+              <button className="secondary" onClick={() => confirm("deep")} disabled={!!submitting}>
+                {submitting === "deep" ? "Investigating…" : "Deep Investigation"}
+              </button>
+              <button onClick={() => confirm("quick")} disabled={!!submitting}>
+                {submitting === "quick" ? "Checking…" : "Quick Check"}
               </button>
             </div>
             {submitError && <p className="error">{submitError}</p>}
