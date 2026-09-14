@@ -210,6 +210,7 @@ export async function POST(request: Request) {
 
   return NextResponse.json({
     id: verification.id,
+    mode: "quick",
     claim: verification.claim_text,
     verdict: verification.verdict,
     confidence: verification.confidence,
