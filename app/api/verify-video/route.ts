@@ -11,6 +11,13 @@ import {
   type CachedVerification,
 } from "@/lib/verification-cache";
 
+// Route-level execution budget (Sept 2026 fix, see app/api/transcribe-
+// video/route.ts's comment for the full rationale): without this, Vercel
+// kills the function at its Hobby-plan default of 10 seconds — well under
+// the video Gemini call's own up-to-35s timeout — silently, with no JSON
+// error body, so the browser just hangs with no feedback. 60 is Hobby's max.
+export const maxDuration = 60;
+
 // Video authenticity Quick Check — mirrors app/api/verify-audio/route.ts as
 // closely as possible (see that file's header, and app/api/verify-image/
 // route.ts before it, for the full rationale on the credit pattern and

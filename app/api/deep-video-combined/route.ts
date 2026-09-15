@@ -12,6 +12,14 @@ import {
   type CachedVerification,
 } from "@/lib/verification-cache";
 
+// Route-level execution budget (Sept 2026 fix, see app/api/transcribe-
+// video/route.ts's comment for the full rationale): without this, Vercel
+// kills the function at its Hobby-plan default of 10 seconds — well under
+// even the FASTER of the two parallel calls this route makes (the text
+// pipeline and the up-to-40s video Gemini call) — silently, with no JSON
+// error body, so the browser just hangs with no feedback. 60 is Hobby's max.
+export const maxDuration = 60;
+
 // Combined video Deep Investigation — mirrors app/api/deep-audio-combined/
 // route.ts exactly, one level down (see app/api/verify-video-combined/
 // route.ts and the audio combined routes for the full rationale). Only

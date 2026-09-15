@@ -2,6 +2,18 @@ import { NextResponse } from "next/server";
 import { createClient as createServerSupabase } from "@/lib/supabase/server";
 import { transcribeVideoSpeech } from "@/lib/video-transcript";
 
+// Route-level execution budget (Sept 2026 fix): without this, Vercel kills
+// the function at its platform default — 10 seconds on Hobby — long before
+// the Gemini call (up to 30s, see video-transcript.ts) can ever finish.
+// That kill is silent from the browser's side: no JSON error body comes
+// back, so a real user just sees the request hang forever with no
+// feedback. 60 is the maximum allowed on Hobby, giving real headroom above
+// the in-app timeout plus request overhead (auth check, base64 parsing).
+// Audio's routes have run under the unset 10s default without this
+// surfacing, since a much smaller audio-only payload usually finishes
+// well under it — video's larger payload routinely does not.
+export const maxDuration = 60;
+
 // Free preview step for video input's transcript sub-path — mirrors
 // app/api/transcribe-audio/route.ts exactly (see that file's header for
 // the full rationale on why transcription is kept free despite being a
