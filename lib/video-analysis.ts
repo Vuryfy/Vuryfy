@@ -250,6 +250,18 @@ export async function runVideoQuickCheck(
   return toResult(data, VIDEO_QUICK_ENGINE_VERSION);
 }
 
+// Sept 15, 2026: timeoutMs raised again, 150s -> 300s, after a real live
+// test against a genuine multi-minute video hit this exact ceiling
+// (confirmed via Vercel Runtime Logs: AiGatewayError "Gemini request failed
+// (network/timeout)", caused by AbortSignal.timeout firing). 150s left too
+// little room once Storage download + Gemini File API upload + ACTIVE-state
+// polling (up to 90s on its own, see lib/gemini-file-upload.ts) are already
+// spent before this call even starts — the reasoning-tier model genuinely
+// needs more wall-clock time to work through several minutes of video than
+// it does for a short clip. Paired with maxDuration raised 300s -> 450s on
+// deep-video/route.ts and deep-video-combined/route.ts (still comfortably
+// under Vercel Pro's 800s GA ceiling, no beta opt-in needed) so the route's
+// own budget doesn't cut this off before the call's own timeout would.
 export async function runVideoDeepInvestigation(
   fileUri: string,
   mimeType: string,
@@ -261,7 +273,7 @@ export async function runVideoDeepInvestigation(
     userPrompt: buildUserPrompt(context),
     responseSchema: VIDEO_SCHEMA,
     videoFileRef: { fileUri, mimeType },
-    timeoutMs: 150_000,
+    timeoutMs: 300_000,
   });
   return toResult(data, VIDEO_DEEP_ENGINE_VERSION);
 }

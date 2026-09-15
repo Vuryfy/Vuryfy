@@ -19,8 +19,14 @@ import {
 
 // Route-level execution budget — Sept 15, 2026: raised from 60s to 300s
 // (Pro's generally-available default/max under Fluid compute) — see
-// app/api/verify-video/route.ts's comment for the full rationale.
-export const maxDuration = 300;
+// app/api/verify-video/route.ts's comment for the full rationale. Raised
+// again the same day, 300s -> 450s, after a real live test against a
+// genuine multi-minute video hit runVideoDeepInvestigation's own internal
+// timeout (see lib/video-analysis.ts's comment on that function) — paired
+// with that fix so the route's own ceiling doesn't cut the call off before
+// its own (now-longer) timeout would. Still comfortably under Vercel Pro's
+// 800s GA ceiling (no beta opt-in needed for anything <=800s).
+export const maxDuration = 450;
 
 // Video authenticity Deep Investigation — mirrors app/api/verify-video/
 // route.ts exactly (see that file's header for the full rationale, and for
