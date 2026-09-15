@@ -43,6 +43,21 @@ import { detectPaymentLink, type PaymentLinkInfo } from "@/lib/detect-payment-li
 // card above the standard payment-QR caution — a common impersonation
 // pattern this doesn't claim to resolve (it never says which of the two
 // is the real one), only surfaces for the user to check before paying.
+//
+// Payee reputation investigation (added Sept 15, 2026, prompted by "what
+// if I want Deep Investigation on this payment QR?"): the payment-QR
+// carve-out above is correct that NEITHER pipeline can confirm who
+// controls a payment ID or that a transaction happened — that's still
+// true here. But a genuinely different, answerable question exists: does
+// this payee's NAME or UPI ID have any public reputation (scam reports,
+// complaints, a legitimate business footprint)? That's an ordinary
+// evidence-grounded web search, same as any other claim, just constructed
+// from the payee's identity rather than typed by the user — see
+// app/api/verify-payee/route.ts and app/api/deep-payee/route.ts. Offered
+// as its own Quick Check/Deep Investigation pair, separate from the
+// payment-info card's "Scan another" action, and only for UPI payment
+// links (there's no payee identity to search for a bare payment-link URL
+// like paypal.me).
 type PayeeSimilarMatch = { payeeName: string; upiId: string; similarity: number; firstSeenAt: string };
 
 export default function VerifyQrPage() {
@@ -56,6 +71,8 @@ export default function VerifyQrPage() {
   const [decodeError, setDecodeError] = useState("");
   const [submitting, setSubmitting] = useState<"quick" | "deep" | null>(null);
   const [submitError, setSubmitError] = useState("");
+  const [payeeChecking, setPayeeChecking] = useState<"quick" | "deep" | null>(null);
+  const [payeeCheckError, setPayeeCheckError] = useState("");
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
@@ -69,6 +86,7 @@ export default function VerifyQrPage() {
     setDecoded(null);
     setPaymentInfo(null);
     setPayeeWarning(null);
+    setPayeeCheckError("");
     try {
       const result = await decodeQrFromFile(file);
       if (!result) {
@@ -128,12 +146,35 @@ export default function VerifyQrPage() {
     }
   }
 
+  async function investigatePayee(mode: "quick" | "deep") {
+    if (!paymentInfo?.payeeId) return;
+    setPayeeChecking(mode);
+    setPayeeCheckError("");
+    try {
+      const endpoint = mode === "quick" ? "/api/verify-payee" : "/api/deep-payee";
+      const r = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payee_name: paymentInfo.payeeName ?? "", upi_id: paymentInfo.payeeId }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || (mode === "quick" ? "Investigation failed" : "Investigation failed"));
+      sessionStorage.setItem("vuryfy_result", JSON.stringify({ ...d, return_to: "/verify/qr" }));
+      router.push(`/result?id=${d.id}`);
+    } catch (e: any) {
+      setPayeeCheckError(e.message);
+    } finally {
+      setPayeeChecking(null);
+    }
+  }
+
   function reset() {
     setDecoded(null);
     setPaymentInfo(null);
     setPayeeWarning(null);
     setDecodeError("");
     setSubmitError("");
+    setPayeeCheckError("");
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
@@ -204,6 +245,32 @@ export default function VerifyQrPage() {
               name above matches who you intend to pay, and confirm directly with them if
               you&apos;re unsure.
             </p>
+
+            {paymentInfo.kind === "upi" && paymentInfo.payeeId && (
+              <div className="qr-decoded" style={{ marginTop: 20 }}>
+                <span>INVESTIGATE THIS PAYEE</span>
+                <p className="hint">
+                  This searches the public web for the payee&apos;s name and ID — scam reports,
+                  complaints, or a legitimate business presence. It still can&apos;t confirm this
+                  transaction or who controls the ID; it can only tell you what&apos;s publicly
+                  findable, which may be nothing either way.
+                </p>
+                <div className="result-actions">
+                  <button
+                    className="secondary"
+                    onClick={() => investigatePayee("deep")}
+                    disabled={!!payeeChecking}
+                  >
+                    {payeeChecking === "deep" ? "Investigating…" : "Deep Investigation"}
+                  </button>
+                  <button onClick={() => investigatePayee("quick")} disabled={!!payeeChecking}>
+                    {payeeChecking === "quick" ? "Checking…" : "Quick Check"}
+                  </button>
+                </div>
+                {payeeCheckError && <p className="error">{payeeCheckError}</p>}
+              </div>
+            )}
+
             <div className="result-actions">
               <button className="secondary" onClick={reset}>
                 Scan another
