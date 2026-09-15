@@ -42,6 +42,18 @@ const SYSTEM_PROMPT = `You transcribe spoken audio from this video verbatim, in 
 
 const MIN_USABLE_LENGTH = 3; // trimmed length below which we treat it as "no speech found" rather than a real transcript
 
+// Sept 15, 2026: widened retry backoff, same reasoning as
+// lib/video-analysis.ts's VIDEO_DEEP_RETRY_DELAYS_MS — a real live test hit
+// a Gemini 503 on this exact call that survived the shared default's 2
+// retries. Unlike video Deep Investigation this is a "cheap" tier call and
+// this route's own Storage object already survives a failed attempt
+// (app/api/transcribe-video/route.ts always passes deleteStorage=false), so
+// a shorter widening than Deep Investigation's is enough here — mainly
+// aimed at absorbing one extra transient overload spike without making the
+// user click "Try Again" themselves. Still comfortably inside this route's
+// 300s maxDuration budget alongside the download/upload steps.
+const VIDEO_TRANSCRIPT_RETRY_DELAYS_MS = [1000, 2000, 4000];
+
 export async function transcribeVideoSpeech(fileUri: string, mimeType: string): Promise<string> {
   const { data } = await callStructured<TranscriptOutput>({
     tier: "cheap",
@@ -50,6 +62,7 @@ export async function transcribeVideoSpeech(fileUri: string, mimeType: string): 
     responseSchema: TRANSCRIPT_SCHEMA,
     videoFileRef: { fileUri, mimeType },
     timeoutMs: 90_000, // longer clips (now up to several minutes) take longer to process than the old short-clip cap ever needed; still bounded
+    retryDelaysMs: VIDEO_TRANSCRIPT_RETRY_DELAYS_MS,
   });
 
   const transcript = typeof data.transcript === "string" ? data.transcript.trim() : "";
