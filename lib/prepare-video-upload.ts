@@ -11,15 +11,28 @@
 // that would need a heavy client-side library (ffmpeg.wasm and similar);
 // V1 keeps this simple: read the file as-is, validate size, base64-encode.
 //
-// The size cap is deliberately tighter than audio's (15MB, same absolute
-// number, but video packs far less duration per MB than compressed audio
-// does) — this is a real, explicit V1 scope limit: it comfortably covers a
-// short phone-camera clip (a few seconds to maybe 20-30s of typical mobile
-// H.264 compression) but not a long video. That's an acceptable trade for
-// V1 (see lib/ai-gateway.ts's header on why this stays on Gemini's inline
-// data path rather than its File API) — revisit if real usage shows people
-// routinely need to check longer clips.
-const MAX_BYTES = 15 * 1024 * 1024; // ~15MB — keeps base64 payload comfortably under Gemini's inline request limit
+// The size cap below is NOT primarily a Gemini limit (see ai-gateway.ts's
+// header) — it's driven by a harder, non-negotiable constraint discovered
+// the same day this shipped: Vercel Serverless Functions cap the incoming
+// REQUEST BODY at 4.5MB, a hard platform limit that cannot be raised on
+// any plan, including this app's own Hobby tier. This video goes to the
+// server as a base64 JSON body (video_base64 + mime_type + context), and
+// base64 inflates raw bytes by ~4/3 — so the real ceiling on raw video
+// size is well under Gemini's own inline-data limit, and far under the
+// original 15MB this shipped with (which produced a silent, confusing 413
+// "Content Too Large" for literally any real video file). 3MB raw keeps
+// the base64 JSON body comfortably under 4.5MB with margin for the JSON
+// wrapper and context field.
+//
+// This is a real, current V1 constraint on clip length (roughly a few
+// seconds of typical phone-camera compression), not a stopgap fixed by
+// tuning a number further — going meaningfully bigger needs a different
+// upload path entirely (e.g. uploading straight to object storage from
+// the browser and having the server fetch it from there, bypassing the
+// serverless function's request body altogether), which is real
+// additional work deliberately left for a follow-up rather than bundled
+// into this fix.
+const MAX_BYTES = 3 * 1024 * 1024; // ~3MB raw — keeps the base64 JSON body under Vercel's 4.5MB hard request-body cap
 
 export interface PreparedVideo {
   base64: string; // no "data:video/...;base64," prefix
@@ -28,7 +41,9 @@ export interface PreparedVideo {
 
 export async function prepareVideoForUpload(file: File): Promise<PreparedVideo> {
   if (file.size > MAX_BYTES) {
-    throw new Error("That video is too large. Try a shorter clip (under ~15MB).");
+    throw new Error(
+      "That video is too large — Vercel's request size limit means we can only accept very short clips right now (under ~3MB, so a few seconds of typical phone video). Try trimming it or recording a shorter clip."
+    );
   }
   const mimeType = file.type || "video/mp4";
   const base64 = await readFileAsBase64(file);

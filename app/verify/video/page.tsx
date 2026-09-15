@@ -154,9 +154,11 @@ export default function VerifyVideoPage() {
         <p className="eyebrow">VIDEO</p>
         <h1>Check a video.</h1>
         <p className="sub">
-          Upload a short video clip (under ~15MB). If we can make out speech, we&apos;ll transcribe
-          it so you can check what&apos;s said, and we&apos;ll also watch the video itself for signs
-          of deepfakes, face-swaps, or AI-generated footage — both from the same check.
+          Upload a very short video clip (under ~3MB — a platform limit on request size means this
+          only fits a few seconds of typical phone video right now). If we can make out speech,
+          we&apos;ll transcribe it so you can check what&apos;s said, and we&apos;ll also watch the
+          video itself for signs of deepfakes, face-swaps, or AI-generated footage — both from the
+          same check.
         </p>
 
         {!hasVideo && (

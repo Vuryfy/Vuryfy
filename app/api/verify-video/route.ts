@@ -42,7 +42,7 @@ const ALLOWED_MIME_TYPES = new Set([
   "video/3gpp",
   "video/x-msvideo",
 ]);
-const MAX_BASE64_LENGTH = 20_000_000;
+const MAX_BASE64_LENGTH = 4_200_000; // ~3MB raw video — see lib/prepare-video-upload.ts's header: this is capped by Vercel's hard 4.5MB request-body limit, not by Gemini
 
 export async function POST(request: Request) {
   const supabase = await createServerSupabase();
@@ -63,7 +63,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "No video was provided." }, { status: 400 });
   }
   if (videoBase64.length > MAX_BASE64_LENGTH) {
-    return NextResponse.json({ error: "That video is too large. Try a shorter clip." }, { status: 400 });
+    return NextResponse.json({ error: "That video is too large for this request (limit is a few seconds of video, ~3MB, due to a Vercel platform limit). Try a shorter clip." }, { status: 400 });
   }
   if (!ALLOWED_MIME_TYPES.has(mimeType)) {
     return NextResponse.json({ error: "Unsupported video type." }, { status: 400 });
