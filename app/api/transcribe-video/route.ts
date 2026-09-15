@@ -1,13 +1,8 @@
 import { NextResponse } from "next/server";
 import { createClient as createServerSupabase } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { transcribeVideoSpeech } from "@/lib/video-transcript";
-import {
-  downloadVideoFromStorage,
-  uploadDownloadedVideoToGemini,
-  cleanupVideoFile,
-  VideoStorageError,
-} from "@/lib/video-file-pipeline";
+import { transcribeVideoSpeechViaDeepgram, DeepgramTranscriptionError } from "@/lib/deepgram-transcript";
+import { downloadVideoFromStorage, VideoStorageError } from "@/lib/video-file-pipeline";
 
 // Route-level execution budget — Sept 15, 2026: raised from 60s to 300s
 // (Pro's generally-available default/max under Fluid compute — confirmed
@@ -38,8 +33,15 @@ export const maxDuration = 300;
 // Deep Investigation call (verify-video-combined, deep-video-combined, or
 // the video-only routes if no speech was found) reuses the SAME uploaded
 // bytes rather than asking the browser to upload the whole file a second
-// time. Those routes own deleting it from Storage; this one only cleans
-// up its own temporary Gemini File API upload.
+// time. Those routes own deleting it from Storage.
+//
+// Sept 15, 2026 (same day, later): transcription itself moved off Gemini
+// onto Deepgram — see lib/deepgram-transcript.ts's header for the full
+// rationale (three separate live Gemini 503s on this exact call in one
+// testing session, the last one surviving the widened retry). This route
+// no longer touches Gemini's File API at all — no upload, so nothing of
+// ours to clean up there anymore; the Storage object's lifecycle is
+// unchanged (still left in place for the next step to reuse).
 const ALLOWED_MIME_TYPES = new Set([
   "video/mp4",
   "video/quicktime",
@@ -74,27 +76,28 @@ export async function POST(request: Request) {
   }
 
   const admin = createAdminClient();
-  let geminiFileName: string | undefined;
 
   try {
     const { bytes } = await downloadVideoFromStorage(admin, storagePath);
-    const geminiFile = await uploadDownloadedVideoToGemini(bytes, mimeType);
-    geminiFileName = geminiFile.name;
-    const transcript = await transcribeVideoSpeech(geminiFile.fileUri, mimeType);
+    const transcript = await transcribeVideoSpeechViaDeepgram(bytes, mimeType);
     return NextResponse.json({ transcript });
   } catch (err) {
     console.error("[transcribe-video] transcription failed:", err);
     const isStorageError = err instanceof VideoStorageError;
+    const isDeepgramError = err instanceof DeepgramTranscriptionError;
     return NextResponse.json(
       {
         error: isStorageError ? err.message : "Try Again",
         ...(process.env.NODE_ENV !== "production" && !isStorageError
-          ? { debug: { message: err instanceof Error ? err.message : String(err) } }
+          ? {
+              debug: {
+                message: err instanceof Error ? err.message : String(err),
+                source: isDeepgramError ? "deepgram" : "unknown",
+              },
+            }
           : {}),
       },
       { status: isStorageError ? 400 : 502 }
     );
-  } finally {
-    await cleanupVideoFile(admin, storagePath, geminiFileName, false);
   }
 }
