@@ -335,7 +335,14 @@ export async function callStructured<T>(params: StructuredCallParams): Promise<S
   const fallbackModels = params.fallbackModels ?? [];
 
   try {
-    return await tryModelWithRetries<T>(params, apiKey, primaryModel, retryDelays);
+    const result = await tryModelWithRetries<T>(params, apiKey, primaryModel, retryDelays);
+    // Sept 15, 2026: added alongside the tier->model split (modelForTier)
+    // specifically so "which model actually answered this call" is
+    // verifiable from Vercel logs instead of inferred from output alone —
+    // came up debugging why a Quick Check and a Deep Investigation on the
+    // same video read as near-identical (see git history same day).
+    console.log(`[ai-gateway] served by ${primaryModel} (tier: ${params.tier}, primary)`);
+    return result;
   } catch (primaryErr) {
     if (fallbackModels.length === 0 || !isRetryableTransientError(primaryErr)) {
       throw primaryErr;
@@ -349,7 +356,9 @@ export async function callStructured<T>(params: StructuredCallParams): Promise<S
     let lastErr: unknown = primaryErr;
     for (const model of fallbackModels) {
       try {
-        return await tryModelWithRetries<T>(params, apiKey, model, []);
+        const result = await tryModelWithRetries<T>(params, apiKey, model, []);
+        console.log(`[ai-gateway] served by ${model} (tier: ${params.tier}, fallback after ${primaryModel} failed)`);
+        return result;
       } catch (err) {
         lastErr = err;
         if (!isRetryableTransientError(err)) {
