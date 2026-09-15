@@ -4,10 +4,22 @@
 // underlying model later never touches call sites.
 //
 // V1 "build thin, not full" (Part 11, refinement #3): only one model wired
-// up for both tiers right now — no health-check/failover/auto-downgrade
-// logic, no fallback provider. Per-call cost logging (Part 19) is captured
-// in the returned `usage` field but not yet persisted anywhere; wire that
-// up when real cost-tracking work starts.
+// up for both tiers by default — no health-check/auto-downgrade logic, no
+// fallback PROVIDER (still just Gemini). Per-call cost logging (Part 19) is
+// captured in the returned `usage` field but not yet persisted anywhere;
+// wire that up when real cost-tracking work starts.
+//
+// Multi-model fallback within Gemini (added Sept 15, 2026): see
+// fallbackModels below — an opt-in per-call list of alternate Gemini model
+// IDs to try, in order, if the primary model exhausts its own retries with
+// a transient error. This is NOT a fallback provider (still one vendor,
+// one API) — it's addressing a specific finding: a real Google AI
+// Developer Forum thread on this exact problem had a Vertex AI user report
+// "we're using Vertex and the errors are the same, no changes at all" —
+// switching to Google's enterprise-tier endpoint doesn't reliably fix
+// 503s, so that's not the lever. Different MODELS run on separate serving
+// pools, though, so one model being overloaded doesn't mean another is at
+// the same moment — see architecture-decisions.md for the full writeup.
 //
 // Transient-failure retry (added Sept 14, 2026): Gemini's `503 The model is
 // currently experiencing high demand` (UNAVAILABLE) is a well-documented,
@@ -68,7 +80,13 @@
 // File API.
 
 const GEMINI_MODEL = "gemini-3.1-flash-lite";
-const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+
+// Sept 15, 2026: was a fixed const built once from GEMINI_MODEL — now a
+// function, since callStructured() needs to hit a DIFFERENT model's
+// endpoint when falling back (see fallbackModels on StructuredCallParams).
+function endpointForModel(model: string): string {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+}
 
 export type ModelTier = "cheap" | "reasoning";
 
@@ -121,6 +139,15 @@ export interface StructuredCallParams {
   // every other caller, which keeps today's default (2 retries, short
   // backoff) unchanged.
   retryDelaysMs?: number[];
+  // Sept 15, 2026 addition: ordered list of alternate Gemini model IDs to
+  // try, one attempt each (no extra backoff sleep — the primary model's own
+  // retryDelaysMs already spent that time), if the primary model's retries
+  // are exhausted and still failing with a transient error. See the file
+  // header for why this exists instead of switching to Vertex AI or adding
+  // a second provider. Left empty for every caller except the ones that
+  // opt in (video transcription, video Deep Investigation — the two calls
+  // with real, repeated live 503s).
+  fallbackModels?: string[];
 }
 
 export interface StructuredCallResult<T> {
@@ -166,9 +193,7 @@ function modelForTier(_tier: ModelTier): string {
   return GEMINI_MODEL;
 }
 
-async function attemptCall<T>(params: StructuredCallParams, apiKey: string): Promise<StructuredCallResult<T>> {
-  void modelForTier(params.tier); // reserved for when tiers diverge onto different models
-
+async function attemptCall<T>(params: StructuredCallParams, apiKey: string, model: string): Promise<StructuredCallResult<T>> {
   // Image/audio parts, when present, go first in the parts array (Gemini's
   // own examples do this consistently) followed by the text prompt — this
   // is a convention, not a hard requirement, but keeping it consistent
@@ -185,7 +210,7 @@ async function attemptCall<T>(params: StructuredCallParams, apiKey: string): Pro
 
   let response: Response;
   try {
-    response = await fetch(GEMINI_ENDPOINT, {
+    response = await fetch(endpointForModel(model), {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -243,9 +268,13 @@ async function attemptCall<T>(params: StructuredCallParams, apiKey: string): Pro
 // tier, with one retry on malformed JSON output (Part 19: "schema-validate
 // before use, retry/fallback on malformed output, never pass raw model
 // text to users").
-async function attemptWithJsonRetry<T>(params: StructuredCallParams, apiKey: string): Promise<StructuredCallResult<T>> {
+async function attemptWithJsonRetry<T>(
+  params: StructuredCallParams,
+  apiKey: string,
+  model: string
+): Promise<StructuredCallResult<T>> {
   try {
-    return await attemptCall<T>(params, apiKey);
+    return await attemptCall<T>(params, apiKey, model);
   } catch (err) {
     if (err instanceof AiGatewayError && err.message.includes("valid JSON envelope")) {
       throw err; // envelope-level failure — retrying won't help
@@ -253,7 +282,7 @@ async function attemptWithJsonRetry<T>(params: StructuredCallParams, apiKey: str
     if (err instanceof SyntaxError) {
       // JSON.parse failure on the model's text — retry once before giving up.
       try {
-        return await attemptCall<T>(params, apiKey);
+        return await attemptCall<T>(params, apiKey, model);
       } catch {
         throw new AiGatewayError("Gemini structured output was not valid JSON, even after one retry", err);
       }
@@ -264,18 +293,19 @@ async function attemptWithJsonRetry<T>(params: StructuredCallParams, apiKey: str
 
 const TRANSIENT_RETRY_DELAYS_MS = [500, 1500]; // 2 retries (3 attempts total), short backoff
 
-export async function callStructured<T>(params: StructuredCallParams): Promise<StructuredCallResult<T>> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new AiGatewayError("GEMINI_API_KEY is not set");
-  }
-
-  const retryDelays = params.retryDelaysMs ?? TRANSIENT_RETRY_DELAYS_MS;
-
+// Runs the retry-with-backoff loop against ONE model. Used for both the
+// primary model (with its own retryDelays) and, below, each fallback model
+// (called with an empty retryDelays — one immediate attempt, no backoff).
+async function tryModelWithRetries<T>(
+  params: StructuredCallParams,
+  apiKey: string,
+  model: string,
+  retryDelays: number[]
+): Promise<StructuredCallResult<T>> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
     try {
-      return await attemptWithJsonRetry<T>(params, apiKey);
+      return await attemptWithJsonRetry<T>(params, apiKey, model);
     } catch (err) {
       lastErr = err;
       const isLastAttempt = attempt === retryDelays.length;
@@ -288,4 +318,41 @@ export async function callStructured<T>(params: StructuredCallParams): Promise<S
   }
   // Unreachable — loop always returns or throws — but keeps TypeScript happy.
   throw lastErr;
+}
+
+export async function callStructured<T>(params: StructuredCallParams): Promise<StructuredCallResult<T>> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new AiGatewayError("GEMINI_API_KEY is not set");
+  }
+
+  const primaryModel = modelForTier(params.tier);
+  const retryDelays = params.retryDelaysMs ?? TRANSIENT_RETRY_DELAYS_MS;
+  const fallbackModels = params.fallbackModels ?? [];
+
+  try {
+    return await tryModelWithRetries<T>(params, apiKey, primaryModel, retryDelays);
+  } catch (primaryErr) {
+    if (fallbackModels.length === 0 || !isRetryableTransientError(primaryErr)) {
+      throw primaryErr;
+    }
+    // Sept 15, 2026: the primary model's own retries are exhausted and it's
+    // still a transient (retryable) failure — try each fallback model once,
+    // in order, stopping at the first success. No backoff sleep here: the
+    // primary model already spent that time, and a different model's
+    // serving pool being overloaded at the exact same moment is unlikely
+    // enough not to be worth waiting for.
+    let lastErr: unknown = primaryErr;
+    for (const model of fallbackModels) {
+      try {
+        return await tryModelWithRetries<T>(params, apiKey, model, []);
+      } catch (err) {
+        lastErr = err;
+        if (!isRetryableTransientError(err)) {
+          throw err;
+        }
+      }
+    }
+    throw lastErr;
+  }
 }

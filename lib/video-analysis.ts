@@ -276,6 +276,14 @@ export async function runVideoQuickCheck(
 // argues against — this much patience.
 const VIDEO_DEEP_RETRY_DELAYS_MS = [1000, 3000, 6000, 10_000];
 
+// Sept 15, 2026: fallback models added alongside the retry widening above,
+// after this exact call hit two consecutive live Gemini 503s even with the
+// widened retry schedule. See ai-gateway.ts's StructuredCallParams header
+// for the full reasoning (a real forum report that Vertex AI sees the same
+// 503s ruled out "switch to the enterprise endpoint" as a fix — a
+// different MODEL, on a separate serving pool, is the actual lever).
+const VIDEO_DEEP_FALLBACK_MODELS = ["gemini-3.5-flash-lite", "gemini-3.8-flash"];
+
 export async function runVideoDeepInvestigation(
   fileUri: string,
   mimeType: string,
@@ -289,6 +297,7 @@ export async function runVideoDeepInvestigation(
     videoFileRef: { fileUri, mimeType },
     timeoutMs: 300_000,
     retryDelaysMs: VIDEO_DEEP_RETRY_DELAYS_MS,
+    fallbackModels: VIDEO_DEEP_FALLBACK_MODELS,
   });
   return toResult(data, VIDEO_DEEP_ENGINE_VERSION);
 }

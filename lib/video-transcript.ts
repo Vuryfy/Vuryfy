@@ -54,6 +54,16 @@ const MIN_USABLE_LENGTH = 3; // trimmed length below which we treat it as "no sp
 // 300s maxDuration budget alongside the download/upload steps.
 const VIDEO_TRANSCRIPT_RETRY_DELAYS_MS = [1000, 2000, 4000];
 
+// Sept 15, 2026: a same-day Deepgram pilot for this exact call was tried
+// and reverted — Deepgram's nova-3 model produced a genuinely wrong
+// transcript on real Hinglish content (word-salad, not just imperfect),
+// which is worse for a trust/verification product than an occasional
+// retry-able error. Gemini's own transcription quality was clearly better
+// on the same content, so this stays on Gemini — paired instead with a
+// fallback-model list (see ai-gateway.ts's StructuredCallParams header for
+// why that's the better lever than a vendor swap or Vertex AI).
+const VIDEO_TRANSCRIPT_FALLBACK_MODELS = ["gemini-3.5-flash-lite", "gemini-3.8-flash"];
+
 export async function transcribeVideoSpeech(fileUri: string, mimeType: string): Promise<string> {
   const { data } = await callStructured<TranscriptOutput>({
     tier: "cheap",
@@ -63,6 +73,7 @@ export async function transcribeVideoSpeech(fileUri: string, mimeType: string): 
     videoFileRef: { fileUri, mimeType },
     timeoutMs: 90_000, // longer clips (now up to several minutes) take longer to process than the old short-clip cap ever needed; still bounded
     retryDelaysMs: VIDEO_TRANSCRIPT_RETRY_DELAYS_MS,
+    fallbackModels: VIDEO_TRANSCRIPT_FALLBACK_MODELS,
   });
 
   const transcript = typeof data.transcript === "string" ? data.transcript.trim() : "";

@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server";
 import { createClient as createServerSupabase } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { transcribeVideoSpeechViaDeepgram, DeepgramTranscriptionError } from "@/lib/deepgram-transcript";
-import { downloadVideoFromStorage, VideoStorageError } from "@/lib/video-file-pipeline";
+import { transcribeVideoSpeech } from "@/lib/video-transcript";
+import {
+  downloadVideoFromStorage,
+  uploadDownloadedVideoToGemini,
+  cleanupVideoFile,
+  VideoStorageError,
+} from "@/lib/video-file-pipeline";
 
 // Route-level execution budget — Sept 15, 2026: raised from 60s to 300s
 // (Pro's generally-available default/max under Fluid compute — confirmed
@@ -35,13 +40,18 @@ export const maxDuration = 300;
 // bytes rather than asking the browser to upload the whole file a second
 // time. Those routes own deleting it from Storage.
 //
-// Sept 15, 2026 (same day, later): transcription itself moved off Gemini
-// onto Deepgram — see lib/deepgram-transcript.ts's header for the full
-// rationale (three separate live Gemini 503s on this exact call in one
-// testing session, the last one surviving the widened retry). This route
-// no longer touches Gemini's File API at all — no upload, so nothing of
-// ours to clean up there anymore; the Storage object's lifecycle is
-// unchanged (still left in place for the next step to reuse).
+// Sept 15, 2026 (same day): this route briefly moved off Gemini onto
+// Deepgram (see lib/deepgram-transcript.ts's header for the full story),
+// after three separate live Gemini 503s on this exact call in one testing
+// session. That pilot was reverted the same day: Deepgram's nova-3 model
+// produced a genuinely wrong transcript on real Hinglish content (not just
+// imperfect — incoherent), which is a worse failure mode for a trust
+// product than an occasional retry-able error. Back on Gemini here, now
+// paired with lib/video-transcript.ts's fallback-model list (see
+// ai-gateway.ts's StructuredCallParams) for real resilience against the
+// 503s without sacrificing transcript quality. lib/deepgram-transcript.ts
+// is left in the repo, unused, in case a different model/config is worth
+// revisiting later.
 const ALLOWED_MIME_TYPES = new Set([
   "video/mp4",
   "video/quicktime",
@@ -76,28 +86,27 @@ export async function POST(request: Request) {
   }
 
   const admin = createAdminClient();
+  let geminiFileName: string | undefined;
 
   try {
     const { bytes } = await downloadVideoFromStorage(admin, storagePath);
-    const transcript = await transcribeVideoSpeechViaDeepgram(bytes, mimeType);
+    const geminiFile = await uploadDownloadedVideoToGemini(bytes, mimeType);
+    geminiFileName = geminiFile.name;
+    const transcript = await transcribeVideoSpeech(geminiFile.fileUri, mimeType);
     return NextResponse.json({ transcript });
   } catch (err) {
     console.error("[transcribe-video] transcription failed:", err);
     const isStorageError = err instanceof VideoStorageError;
-    const isDeepgramError = err instanceof DeepgramTranscriptionError;
     return NextResponse.json(
       {
         error: isStorageError ? err.message : "Try Again",
         ...(process.env.NODE_ENV !== "production" && !isStorageError
-          ? {
-              debug: {
-                message: err instanceof Error ? err.message : String(err),
-                source: isDeepgramError ? "deepgram" : "unknown",
-              },
-            }
+          ? { debug: { message: err instanceof Error ? err.message : String(err) } }
           : {}),
       },
       { status: isStorageError ? 400 : 502 }
     );
+  } finally {
+    await cleanupVideoFile(admin, storagePath, geminiFileName, false);
   }
 }
