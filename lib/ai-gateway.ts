@@ -109,6 +109,18 @@ export interface StructuredCallParams {
   videoParts?: VideoPart[];
   videoFileRef?: VideoFileRef;
   timeoutMs?: number;
+  // Sept 15, 2026 addition: per-call override for the transient-retry
+  // backoff schedule (see TRANSIENT_RETRY_DELAYS_MS below). Added after a
+  // real video Deep Investigation call hit Gemini 503s twice in a row even
+  // after the existing 2-retry/short-backoff default — a heavier
+  // reasoning-tier call over a multi-minute video is more exposed to
+  // transient overload than a fast text call, and (unlike a text Quick
+  // Check, which must stay inside Part 26.4's ~5-15s target) video Deep
+  // Investigation already has a generous maxDuration budget (450s) and a
+  // "takes longer" user expectation to spend it against. Left undefined for
+  // every other caller, which keeps today's default (2 retries, short
+  // backoff) unchanged.
+  retryDelaysMs?: number[];
 }
 
 export interface StructuredCallResult<T> {
@@ -258,15 +270,17 @@ export async function callStructured<T>(params: StructuredCallParams): Promise<S
     throw new AiGatewayError("GEMINI_API_KEY is not set");
   }
 
+  const retryDelays = params.retryDelaysMs ?? TRANSIENT_RETRY_DELAYS_MS;
+
   let lastErr: unknown;
-  for (let attempt = 0; attempt <= TRANSIENT_RETRY_DELAYS_MS.length; attempt++) {
+  for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
     try {
       return await attemptWithJsonRetry<T>(params, apiKey);
     } catch (err) {
       lastErr = err;
-      const isLastAttempt = attempt === TRANSIENT_RETRY_DELAYS_MS.length;
+      const isLastAttempt = attempt === retryDelays.length;
       if (!isLastAttempt && isRetryableTransientError(err)) {
-        await sleep(TRANSIENT_RETRY_DELAYS_MS[attempt]);
+        await sleep(retryDelays[attempt]);
         continue;
       }
       throw err;

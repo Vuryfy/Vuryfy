@@ -262,6 +262,20 @@ export async function runVideoQuickCheck(
 // deep-video/route.ts and deep-video-combined/route.ts (still comfortably
 // under Vercel Pro's 800s GA ceiling, no beta opt-in needed) so the route's
 // own budget doesn't cut this off before the call's own timeout would.
+// Sept 15, 2026: retryDelaysMs widened after two real, consecutive live-test
+// failures on this exact call — Gemini 503 (overloaded), twice in a row,
+// even after the ai-gateway's default 2-retry/short-backoff schedule was
+// exhausted both times. 4 retries (5 attempts total) with longer backoff
+// (1s/3s/6s/10s, ~20s of backoff worst case) — cheap against the 450s route
+// budget this call already has headroom in (see maxDuration on deep-video/
+// deep-video-combined route.ts), and a 503 itself returns fast rather than
+// consuming the full per-attempt timeout, so this doesn't meaningfully risk
+// the route's own ceiling. Left as a per-call override (see ai-gateway.ts's
+// StructuredCallParams) rather than widening the global default, since a
+// fast text call has no need for — and Part 26.4's latency target actively
+// argues against — this much patience.
+const VIDEO_DEEP_RETRY_DELAYS_MS = [1000, 3000, 6000, 10_000];
+
 export async function runVideoDeepInvestigation(
   fileUri: string,
   mimeType: string,
@@ -274,6 +288,7 @@ export async function runVideoDeepInvestigation(
     responseSchema: VIDEO_SCHEMA,
     videoFileRef: { fileUri, mimeType },
     timeoutMs: 300_000,
+    retryDelaysMs: VIDEO_DEEP_RETRY_DELAYS_MS,
   });
   return toResult(data, VIDEO_DEEP_ENGINE_VERSION);
 }
