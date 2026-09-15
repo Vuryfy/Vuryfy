@@ -36,6 +36,16 @@ export async function downloadVideoFromStorage(
 ): Promise<DownloadedVideo> {
   const { data: blob, error } = await admin.storage.from("temp-video-uploads").download(storagePath);
   if (error || !blob) {
+    // Sept 15, 2026 diagnostic addition: the user-facing message below is
+    // deliberately generic, but until now the ACTUAL Supabase Storage error
+    // (permission denied, object genuinely missing, network error, etc.)
+    // was silently discarded — making a real first-live-test failure
+    // undiagnosable from server logs alone. Log it here so the next failure
+    // (if any) is actually debuggable.
+    console.error("[video-file-pipeline] Storage download failed:", {
+      storagePath,
+      error,
+    });
     throw new VideoStorageError("That upload could not be found — please choose the video again.");
   }
   const bytes = await blob.arrayBuffer();
