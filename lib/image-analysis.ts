@@ -77,6 +77,17 @@ import type { QuickCheckEvidence } from "@/lib/quick-check";
 export const IMAGE_QUICK_ENGINE_VERSION = "v1-gemini-vision-quick";
 export const IMAGE_DEEP_ENGINE_VERSION = "v2-gemini-vision-webdetect-deep";
 
+// Sept 15, 2026: added after a live 503 surfaced this gap on text Deep
+// Investigation's identical call (see deep-investigation.ts's
+// SYNTHESIS_FALLBACK_MODELS for the full story) — modelForTier's
+// "reasoning" tier now points every Deep Investigation pipeline at
+// gemini-3.8-flash, but the fallback safety net had only ever been wired
+// into video Deep Investigation. Image shares the same exposure. (Not an
+// engine_version bump — this file's Deep Investigation is never cached in
+// the first place, see the comment above, so there's no stale-cache risk
+// to invalidate here, just the same missing resilience to add.)
+const IMAGE_DEEP_FALLBACK_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"];
+
 export interface ImageAnalysisResult {
   verdict: string;
   confidence: number;
@@ -234,6 +245,7 @@ export async function runImageDeepInvestigation(
     responseSchema: buildVisionSchema(DEEP_VERDICTS),
     imageParts: [{ mimeType, data: imageBase64 }],
     timeoutMs: 25_000,
+    fallbackModels: IMAGE_DEEP_FALLBACK_MODELS,
   });
   return toResult(data, IMAGE_DEEP_ENGINE_VERSION, DEEP_VERDICTS, webPages);
 }

@@ -80,7 +80,21 @@ import type { QuickCheckEvidence } from "@/lib/quick-check";
 // meaningful duplicate-audio traffic.
 
 export const AUDIO_QUICK_ENGINE_VERSION = "v4-gemini-audio-quick-aigen";
-export const AUDIO_DEEP_ENGINE_VERSION = "v4-gemini-audio-deep-aigen";
+// Sept 15, 2026: bumped v4 -> v5 — same reasoning as video-analysis.ts's
+// identical bump on VIDEO_DEEP_ENGINE_VERSION this same day: the model
+// behind "reasoning" tier changed (ai-gateway.ts's modelForTier), and
+// leaving this unchanged would keep serving pre-change cached verdicts
+// out of the exact-match cache indefinitely, since cache entries are keyed
+// on this string (see verification-cache.ts).
+export const AUDIO_DEEP_ENGINE_VERSION = "v5-gemini-audio-deep-aigen";
+
+// Sept 15, 2026: added same day, after a live 503 surfaced this gap on
+// text Deep Investigation's identical call (see deep-investigation.ts's
+// SYNTHESIS_FALLBACK_MODELS for the full story) — modelForTier's
+// "reasoning" tier now points every Deep Investigation pipeline at
+// gemini-3.8-flash, but the fallback safety net had only ever been wired
+// into video Deep Investigation. Audio shares the same exposure.
+const AUDIO_DEEP_FALLBACK_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"];
 
 export interface AudioAnalysisResult {
   verdict: string;
@@ -260,6 +274,7 @@ export async function runAudioDeepInvestigation(
     responseSchema: AUDIO_SCHEMA,
     audioParts: [{ mimeType, data: audioBase64 }],
     timeoutMs: 30_000,
+    fallbackModels: AUDIO_DEEP_FALLBACK_MODELS,
   });
   return toResult(data, AUDIO_DEEP_ENGINE_VERSION);
 }

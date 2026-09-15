@@ -4,10 +4,22 @@
 // underlying model later never touches call sites.
 //
 // V1 "build thin, not full" (Part 11, refinement #3): only one model wired
-// up for both tiers right now — no health-check/failover/auto-downgrade
-// logic, no fallback provider. Per-call cost logging (Part 19) is captured
-// in the returned `usage` field but not yet persisted anywhere; wire that
-// up when real cost-tracking work starts.
+// up for both tiers by default — no health-check/auto-downgrade logic, no
+// fallback PROVIDER (still just Gemini). Per-call cost logging (Part 19) is
+// captured in the returned `usage` field but not yet persisted anywhere;
+// wire that up when real cost-tracking work starts.
+//
+// Multi-model fallback within Gemini (added Sept 15, 2026): see
+// fallbackModels below — an opt-in per-call list of alternate Gemini model
+// IDs to try, in order, if the primary model exhausts its own retries with
+// a transient error. This is NOT a fallback provider (still one vendor,
+// one API) — it's addressing a specific finding: a real Google AI
+// Developer Forum thread on this exact problem had a Vertex AI user report
+// "we're using Vertex and the errors are the same, no changes at all" —
+// switching to Google's enterprise-tier endpoint doesn't reliably fix
+// 503s, so that's not the lever. Different MODELS run on separate serving
+// pools, though, so one model being overloaded doesn't mean another is at
+// the same moment — see architecture-decisions.md for the full writeup.
 //
 // Transient-failure retry (added Sept 14, 2026): Gemini's `503 The model is
 // currently experiencing high demand` (UNAVAILABLE) is a well-documented,
@@ -40,9 +52,42 @@
 // lib/audio-analysis.ts (authenticity analysis); every other caller is
 // unaffected. imageParts and audioParts can in principle both be set on one
 // call, though no current caller does that.
+//
+// Video input (added for video Quick Check/Deep Investigation, Sept 2026 —
+// last step in the locked media-type build order): same mechanism again.
+// Gemini's generateContent accepts inline video data (mp4/webm/mov/etc.)
+// the identical way — it natively processes both the visual frames AND the
+// video's own audio track from one inlineData part, which is exactly why
+// lib/video-transcript.ts can transcribe speech straight from a video file
+// without any separate audio-extraction step. Kept as its own named
+// videoParts array (rather than reusing audioParts, even though the
+// runtime shape is identical) for the same call-site-clarity reason
+// audioParts was kept separate from imageParts. Used by
+// lib/video-transcript.ts (transcription) and lib/video-analysis.ts
+// (authenticity/deepfake analysis); every other caller is unaffected.
+//
+// Gemini File API support (added Sept 15, 2026, superseding the "revisit
+// only if real usage shows..." note above — the user explicitly asked for
+// 3-5+ minute video support): videoParts (inlineData) stays in place for
+// any future small-payload caller, but video's own callers
+// (lib/video-transcript.ts, lib/video-analysis.ts) now exclusively use the
+// new videoFileRef param below instead. A video that size can't fit
+// Gemini's inline-request limit (100MB total, less once base64-inflated)
+// the way a short clip could — see lib/gemini-file-upload.ts for the
+// upload/cleanup mechanics. videoFileRef sends Gemini a `fileData` part
+// (fileUri + mimeType) instead of an `inlineData` part — a different shape
+// Gemini's generateContent accepts for content already uploaded via its
+// File API.
 
 const GEMINI_MODEL = "gemini-3.1-flash-lite";
-const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+const GEMINI_REASONING_MODEL = "gemini-3.8-flash";
+
+// Sept 15, 2026: was a fixed const built once from GEMINI_MODEL — now a
+// function, since callStructured() needs to hit a DIFFERENT model's
+// endpoint when falling back (see fallbackModels on StructuredCallParams).
+function endpointForModel(model: string): string {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+}
 
 export type ModelTier = "cheap" | "reasoning";
 
@@ -58,6 +103,20 @@ export interface ImagePart {
 // call site even though the runtime shape is identical).
 export type AudioPart = ImagePart;
 
+// Same shape again, same reasoning — see AudioPart above.
+export type VideoPart = ImagePart;
+
+// A reference to a file already uploaded via Gemini's File API (see
+// lib/gemini-file-upload.ts), rather than raw inline bytes — the shape
+// Gemini's generateContent expects is a `fileData` part (fileUri +
+// mimeType) instead of `inlineData` (mimeType + base64 data). Video's own
+// callers use this exclusively now; kept distinct from VideoPart since the
+// two are not interchangeable at the request level.
+export interface VideoFileRef {
+  fileUri: string;
+  mimeType: string;
+}
+
 export interface StructuredCallParams {
   tier: ModelTier;
   systemPrompt: string;
@@ -66,7 +125,30 @@ export interface StructuredCallParams {
   temperature?: number;
   imageParts?: ImagePart[];
   audioParts?: AudioPart[];
+  videoParts?: VideoPart[];
+  videoFileRef?: VideoFileRef;
   timeoutMs?: number;
+  // Sept 15, 2026 addition: per-call override for the transient-retry
+  // backoff schedule (see TRANSIENT_RETRY_DELAYS_MS below). Added after a
+  // real video Deep Investigation call hit Gemini 503s twice in a row even
+  // after the existing 2-retry/short-backoff default — a heavier
+  // reasoning-tier call over a multi-minute video is more exposed to
+  // transient overload than a fast text call, and (unlike a text Quick
+  // Check, which must stay inside Part 26.4's ~5-15s target) video Deep
+  // Investigation already has a generous maxDuration budget (450s) and a
+  // "takes longer" user expectation to spend it against. Left undefined for
+  // every other caller, which keeps today's default (2 retries, short
+  // backoff) unchanged.
+  retryDelaysMs?: number[];
+  // Sept 15, 2026 addition: ordered list of alternate Gemini model IDs to
+  // try, one attempt each (no extra backoff sleep — the primary model's own
+  // retryDelaysMs already spent that time), if the primary model's retries
+  // are exhausted and still failing with a transient error. See the file
+  // header for why this exists instead of switching to Vertex AI or adding
+  // a second provider. Left empty for every caller except the ones that
+  // opt in (video transcription, video Deep Investigation — the two calls
+  // with real, repeated live 503s).
+  fallbackModels?: string[];
 }
 
 export interface StructuredCallResult<T> {
@@ -104,17 +186,18 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// One model wired for both tiers in V1 (see file header). Kept as a lookup
-// rather than using GEMINI_MODEL directly at call sites so that giving the
-// reasoning tier its own (likely larger/pricier) model later — for Deep
-// Investigation — is a one-line change here, not a refactor of callers.
-function modelForTier(_tier: ModelTier): string {
-  return GEMINI_MODEL;
+// Sept 15, 2026: was one model wired for both tiers in V1 (see file
+// header) — Quick Check and Deep Investigation were hitting the literal
+// same model, so a Deep Investigation's only real difference was a longer
+// timeout and one extra sentence in its prompt, not a deeper pass. Kept as
+// a lookup (rather than using GEMINI_MODEL directly at call sites) so this
+// stayed a one-line change once it was time to make it, as anticipated.
+// "reasoning" tier now gets a genuinely stronger model.
+function modelForTier(tier: ModelTier): string {
+  return tier === "reasoning" ? GEMINI_REASONING_MODEL : GEMINI_MODEL;
 }
 
-async function attemptCall<T>(params: StructuredCallParams, apiKey: string): Promise<StructuredCallResult<T>> {
-  void modelForTier(params.tier); // reserved for when tiers diverge onto different models
-
+async function attemptCall<T>(params: StructuredCallParams, apiKey: string, model: string): Promise<StructuredCallResult<T>> {
   // Image/audio parts, when present, go first in the parts array (Gemini's
   // own examples do this consistently) followed by the text prompt — this
   // is a convention, not a hard requirement, but keeping it consistent
@@ -122,12 +205,16 @@ async function attemptCall<T>(params: StructuredCallParams, apiKey: string): Pro
   const parts: Record<string, unknown>[] = [
     ...(params.imageParts ?? []).map((p) => ({ inlineData: { mimeType: p.mimeType, data: p.data } })),
     ...(params.audioParts ?? []).map((p) => ({ inlineData: { mimeType: p.mimeType, data: p.data } })),
+    ...(params.videoParts ?? []).map((p) => ({ inlineData: { mimeType: p.mimeType, data: p.data } })),
+    ...(params.videoFileRef
+      ? [{ fileData: { fileUri: params.videoFileRef.fileUri, mimeType: params.videoFileRef.mimeType } }]
+      : []),
     { text: params.userPrompt },
   ];
 
   let response: Response;
   try {
-    response = await fetch(GEMINI_ENDPOINT, {
+    response = await fetch(endpointForModel(model), {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -185,9 +272,13 @@ async function attemptCall<T>(params: StructuredCallParams, apiKey: string): Pro
 // tier, with one retry on malformed JSON output (Part 19: "schema-validate
 // before use, retry/fallback on malformed output, never pass raw model
 // text to users").
-async function attemptWithJsonRetry<T>(params: StructuredCallParams, apiKey: string): Promise<StructuredCallResult<T>> {
+async function attemptWithJsonRetry<T>(
+  params: StructuredCallParams,
+  apiKey: string,
+  model: string
+): Promise<StructuredCallResult<T>> {
   try {
-    return await attemptCall<T>(params, apiKey);
+    return await attemptCall<T>(params, apiKey, model);
   } catch (err) {
     if (err instanceof AiGatewayError && err.message.includes("valid JSON envelope")) {
       throw err; // envelope-level failure — retrying won't help
@@ -195,7 +286,7 @@ async function attemptWithJsonRetry<T>(params: StructuredCallParams, apiKey: str
     if (err instanceof SyntaxError) {
       // JSON.parse failure on the model's text — retry once before giving up.
       try {
-        return await attemptCall<T>(params, apiKey);
+        return await attemptCall<T>(params, apiKey, model);
       } catch {
         throw new AiGatewayError("Gemini structured output was not valid JSON, even after one retry", err);
       }
@@ -206,21 +297,24 @@ async function attemptWithJsonRetry<T>(params: StructuredCallParams, apiKey: str
 
 const TRANSIENT_RETRY_DELAYS_MS = [500, 1500]; // 2 retries (3 attempts total), short backoff
 
-export async function callStructured<T>(params: StructuredCallParams): Promise<StructuredCallResult<T>> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new AiGatewayError("GEMINI_API_KEY is not set");
-  }
-
+// Runs the retry-with-backoff loop against ONE model. Used for both the
+// primary model (with its own retryDelays) and, below, each fallback model
+// (called with an empty retryDelays — one immediate attempt, no backoff).
+async function tryModelWithRetries<T>(
+  params: StructuredCallParams,
+  apiKey: string,
+  model: string,
+  retryDelays: number[]
+): Promise<StructuredCallResult<T>> {
   let lastErr: unknown;
-  for (let attempt = 0; attempt <= TRANSIENT_RETRY_DELAYS_MS.length; attempt++) {
+  for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
     try {
-      return await attemptWithJsonRetry<T>(params, apiKey);
+      return await attemptWithJsonRetry<T>(params, apiKey, model);
     } catch (err) {
       lastErr = err;
-      const isLastAttempt = attempt === TRANSIENT_RETRY_DELAYS_MS.length;
+      const isLastAttempt = attempt === retryDelays.length;
       if (!isLastAttempt && isRetryableTransientError(err)) {
-        await sleep(TRANSIENT_RETRY_DELAYS_MS[attempt]);
+        await sleep(retryDelays[attempt]);
         continue;
       }
       throw err;
@@ -228,4 +322,50 @@ export async function callStructured<T>(params: StructuredCallParams): Promise<S
   }
   // Unreachable — loop always returns or throws — but keeps TypeScript happy.
   throw lastErr;
+}
+
+export async function callStructured<T>(params: StructuredCallParams): Promise<StructuredCallResult<T>> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new AiGatewayError("GEMINI_API_KEY is not set");
+  }
+
+  const primaryModel = modelForTier(params.tier);
+  const retryDelays = params.retryDelaysMs ?? TRANSIENT_RETRY_DELAYS_MS;
+  const fallbackModels = params.fallbackModels ?? [];
+
+  try {
+    const result = await tryModelWithRetries<T>(params, apiKey, primaryModel, retryDelays);
+    // Sept 15, 2026: added alongside the tier->model split (modelForTier)
+    // specifically so "which model actually answered this call" is
+    // verifiable from Vercel logs instead of inferred from output alone —
+    // came up debugging why a Quick Check and a Deep Investigation on the
+    // same video read as near-identical (see git history same day).
+    console.log(`[ai-gateway] served by ${primaryModel} (tier: ${params.tier}, primary)`);
+    return result;
+  } catch (primaryErr) {
+    if (fallbackModels.length === 0 || !isRetryableTransientError(primaryErr)) {
+      throw primaryErr;
+    }
+    // Sept 15, 2026: the primary model's own retries are exhausted and it's
+    // still a transient (retryable) failure — try each fallback model once,
+    // in order, stopping at the first success. No backoff sleep here: the
+    // primary model already spent that time, and a different model's
+    // serving pool being overloaded at the exact same moment is unlikely
+    // enough not to be worth waiting for.
+    let lastErr: unknown = primaryErr;
+    for (const model of fallbackModels) {
+      try {
+        const result = await tryModelWithRetries<T>(params, apiKey, model, []);
+        console.log(`[ai-gateway] served by ${model} (tier: ${params.tier}, fallback after ${primaryModel} failed)`);
+        return result;
+      } catch (err) {
+        lastErr = err;
+        if (!isRetryableTransientError(err)) {
+          throw err;
+        }
+      }
+    }
+    throw lastErr;
+  }
 }

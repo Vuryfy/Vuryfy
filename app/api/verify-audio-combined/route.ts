@@ -11,6 +11,12 @@ import {
   type CachedVerification,
 } from "@/lib/verification-cache";
 
+// Route-level execution budget (Sept 2026 fix — see app/api/deep/route.ts's
+// comment for the full rationale). This route runs two AI pipelines in
+// parallel (text + audio), so it's exposed to Vercel's silent 10s default
+// kill even more than most. 60 is Hobby's max.
+export const maxDuration = 60;
+
 // Combined audio Quick Check — Sept 14, 2026 addition. The original ship
 // offered the transcript fact-check and the audio-authenticity listen-
 // through as two fully independent sub-paths, each with its own Quick

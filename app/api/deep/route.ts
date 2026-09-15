@@ -5,6 +5,19 @@ import { runDeepInvestigation, DEEP_ENGINE_VERSION, type DeepInvestigationResult
 import { normalizeClaim } from "@/lib/quick-check";
 import { computeCacheKey, getCachedVerification, writeCache, type CachedVerification } from "@/lib/verification-cache";
 import { detectPaymentReceipt } from "@/lib/detect-payment-receipt";
+import { detectPaymentRequest } from "@/lib/detect-payment-request";
+
+// Route-level execution budget (Sept 2026 fix, added across every AI-
+// calling route after the video-upload 413 investigation surfaced that
+// NONE of them declared this — see lib/prepare-video-upload.ts and app/
+// api/transcribe-video/route.ts for the original discovery). Without this,
+// Vercel kills the function at its Hobby-plan default of 10 seconds, which
+// Deep Investigation's multi-step decompose-and-search pipeline can
+// realistically exceed under real-world latency variance. A killed
+// function returns no JSON body, so the browser just hangs with no
+// feedback — the same silent-failure shape video hit, just triggered by
+// slow search/synthesis instead of a large payload. 60 is Hobby's max.
+export const maxDuration = 60;
 
 // Deep Investigation (Part 11 routing logic + Part 26.5) — a heavier,
 // multi-angle version of Quick Check: the claim is decomposed into a
@@ -82,6 +95,30 @@ export async function POST(request: Request) {
       type: "payment_receipt",
       claim,
       receipt,
+      credits: {
+        quick_checks: balance?.quick_checks_remaining ?? 0,
+        deep_investigations: balance?.deep_investigations_remaining ?? 0,
+        total: (balance?.quick_checks_remaining ?? 0) + (balance?.deep_investigations_remaining ?? 0),
+      },
+    });
+  }
+
+  // Payment-REQUEST carve-out (Sept 15, 2026, see lib/detect-payment-
+  // request.ts) — mirrors the same carve-out in app/api/verify/route.ts.
+  const paymentRequest = detectPaymentRequest(claim);
+  if (paymentRequest) {
+    const { data: balance } = await admin
+      .from("credit_balances")
+      .select("quick_checks_remaining, deep_investigations_remaining")
+      .eq("user_id", user.id)
+      .single();
+
+    return NextResponse.json({
+      id: null,
+      mode: "deep",
+      type: "payment_request",
+      claim,
+      payment_request: paymentRequest,
       credits: {
         quick_checks: balance?.quick_checks_remaining ?? 0,
         deep_investigations: balance?.deep_investigations_remaining ?? 0,

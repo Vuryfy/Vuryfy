@@ -6,6 +6,12 @@ import { runImageQuickCheck, type ImageAnalysisResult } from "@/lib/image-analys
 import { computeCacheKey, getCachedVerification, writeCache, type CachedVerification } from "@/lib/verification-cache";
 import { detectPaymentReceipt } from "@/lib/detect-payment-receipt";
 
+// Route-level execution budget (Sept 2026 fix — see app/api/deep/route.ts's
+// comment for the full rationale). This route runs two AI pipelines in
+// parallel (OCR text + photo), so it's exposed to Vercel's silent 10s
+// default kill even more than most. 60 is Hobby's max.
+export const maxDuration = 60;
+
 // Combined image Quick Check — Sept 15, 2026, mirrors app/api/verify-audio-
 // combined/route.ts's rationale exactly, applied to the same standing
 // duplicate-buttons complaint that prompted the audio consolidation: a

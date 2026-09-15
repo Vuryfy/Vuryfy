@@ -193,6 +193,9 @@ export default function VerifyAudioPage() {
             <p className="hint">
               Got a photo instead? <Link href="/verify/image">Check it</Link>
             </p>
+            <p className="hint">
+              Got a video instead? <Link href="/verify/video">Check it</Link>
+            </p>
           </>
         )}
 

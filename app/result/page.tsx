@@ -12,6 +12,12 @@ type PaymentReceiptInfo = {
   raw: string;
 };
 
+type PaymentRequestInfo = {
+  payeeName?: string;
+  payeeId?: string;
+  raw: string;
+};
+
 type Result = {
   id: string | null;
   mode?: "quick" | "deep";
@@ -31,8 +37,16 @@ type Result = {
   // treatment payment QR codes already get on the QR page, just reachable
   // from any text-shaped input (typed claims, QR text, OCR'd photos,
   // audio transcripts) since that's where a receipt can turn up.
-  type?: "verification" | "payment_receipt";
+  // Payment-REQUEST carve-out (Sept 15, 2026, see lib/detect-payment-
+  // request.ts): sibling of payment_receipt above, for text/OCR shaped
+  // like a "scan to pay" identity card (name + UPI ID, no completed
+  // transaction) rather than a completed-payment confirmation — the same
+  // informational, non-verdict treatment, just a different source shape
+  // (most commonly a photographed/OCR'd screenshot of someone's own QR
+  // display screen).
+  type?: "verification" | "payment_receipt" | "payment_request";
   receipt?: PaymentReceiptInfo | null;
+  payment_request?: PaymentRequestInfo | null;
   // Second verdict block (added for audio's combined Quick Check/Deep
   // Investigation, Sept 14, 2026 — see app/api/verify-audio-combined/
   // route.ts): when a single button press runs two independent pipelines
@@ -58,6 +72,8 @@ type Result = {
 export default function ResultPage() {
   const router = useRouter();
   const [r, setR] = useState<Result | null>(null);
+  const [payeeChecking, setPayeeChecking] = useState<"quick" | "deep" | null>(null);
+  const [payeeCheckError, setPayeeCheckError] = useState("");
 
   useEffect(() => {
     const x = sessionStorage.getItem("vuryfy_result");
@@ -66,6 +82,39 @@ export default function ResultPage() {
   }, [router]);
 
   if (!r) return null;
+
+  // Reuses app/api/verify-payee and app/api/deep-payee (see
+  // app/verify/qr/page.tsx for the original of this pattern, added for a
+  // QR-decoded payment link). Available here too since a payment_request
+  // card carries the same payee name/UPI ID a QR-decoded one does — the
+  // question "does this payee have any public reputation" is answerable
+  // either way. Swaps the displayed result in place rather than
+  // navigating, since we're already on /result.
+  async function investigatePayee(mode: "quick" | "deep") {
+    if (!r?.payment_request?.payeeId) return;
+    setPayeeChecking(mode);
+    setPayeeCheckError("");
+    try {
+      const endpoint = mode === "quick" ? "/api/verify-payee" : "/api/deep-payee";
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          payee_name: r.payment_request.payeeName ?? "",
+          upi_id: r.payment_request.payeeId,
+        }),
+      });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || "Investigation failed");
+      const next = { ...d, return_to: r.return_to };
+      sessionStorage.setItem("vuryfy_result", JSON.stringify(next));
+      setR(next);
+    } catch (e: any) {
+      setPayeeCheckError(e.message);
+    } finally {
+      setPayeeChecking(null);
+    }
+  }
 
   // mode is absent on results saved before this field existed (an old
   // sessionStorage entry surviving a hard refresh) — quick is the correct
@@ -101,6 +150,69 @@ export default function ResultPage() {
               credit before relying on this. No credit was charged for this check.
             </p>
           </div>
+          <div className="claim">
+            <span>WHAT WE READ</span>
+            <p>{r.claim}</p>
+          </div>
+          <div className="result-actions">
+            <button className="secondary" onClick={() => router.push(newCheckHref)}>
+              Check another
+            </button>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  if (r.type === "payment_request") {
+    return (
+      <main className="shell narrow">
+        <nav>
+          <button className="back" onClick={() => router.push(newCheckHref)}>
+            ← New check
+          </button>
+          <div className="credits">Credits · {r.credits.total}</div>
+        </nav>
+        <section className="result">
+          <p className="eyebrow">PAYMENT REQUEST / QR CODE</p>
+          <div className="qr-payment">
+            <span>THIS LOOKS LIKE A "SCAN TO PAY" CARD</span>
+            <h3>{r.payment_request?.payeeName || "Unnamed payee"}</h3>
+            {r.payment_request?.payeeId && <p className="payee-id">{r.payment_request.payeeId}</p>}
+            <p className="caution">
+              Vuryfy can&apos;t verify who actually controls a payment ID like this — that
+              isn&apos;t something a web search can confirm, whether it arrives as a scannable QR
+              code or a screenshot of one. Before paying, make sure the name above matches who
+              you intend to pay, and confirm directly with them if you&apos;re unsure. No credit
+              was charged for this check.
+            </p>
+          </div>
+
+          {r.payment_request?.payeeId && (
+            <div className="qr-decoded" style={{ marginTop: 20 }}>
+              <span>INVESTIGATE THIS PAYEE</span>
+              <p className="hint">
+                This searches the public web for the payee&apos;s name and ID — scam reports,
+                complaints, or a legitimate business presence. It still can&apos;t confirm who
+                controls the ID; it can only tell you what&apos;s publicly findable, which may be
+                nothing either way.
+              </p>
+              <div className="result-actions">
+                <button
+                  className="secondary"
+                  onClick={() => investigatePayee("deep")}
+                  disabled={!!payeeChecking}
+                >
+                  {payeeChecking === "deep" ? "Investigating…" : "Deep Investigation"}
+                </button>
+                <button onClick={() => investigatePayee("quick")} disabled={!!payeeChecking}>
+                  {payeeChecking === "quick" ? "Checking…" : "Quick Check"}
+                </button>
+              </div>
+              {payeeCheckError && <p className="error">{payeeCheckError}</p>}
+            </div>
+          )}
+
           <div className="claim">
             <span>WHAT WE READ</span>
             <p>{r.claim}</p>

@@ -4,6 +4,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { runQuickCheck, normalizeClaim, ENGINE_VERSION, type QuickCheckResult } from "@/lib/quick-check";
 import { computeCacheKey, getCachedVerification, writeCache, type CachedVerification } from "@/lib/verification-cache";
 
+// Route-level execution budget (Sept 2026 fix — see app/api/deep/route.ts's
+// comment for the full rationale). 60 is Hobby's max; without it Vercel's
+// silent 10s default kill can cut off runQuickCheck's search-and-synthesize
+// pipeline before it returns.
+export const maxDuration = 60;
+
 // Payee reputation Quick Check — Sept 15, 2026, added from the payment-QR
 // card (app/verify/qr/page.tsx) after a user asked "what if I want Deep
 // Investigation on this?" for a payment QR.
