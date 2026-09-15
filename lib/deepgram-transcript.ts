@@ -142,7 +142,13 @@ export async function transcribeVideoSpeechViaDeepgram(videoBytes: ArrayBuffer, 
         Authorization: `Token ${apiKey}`,
         "Content-Type": "audio/wav",
       },
-      body: wavBytes,
+      // fetch's TS signature comes from the "dom" lib (tsconfig.json's
+      // `lib` array), whose BodyInit type doesn't structurally accept
+      // @types/node's newer generic `Buffer<ArrayBufferLike>` even though
+      // it's a real ArrayBufferView at runtime — wrapping in a plain
+      // Uint8Array satisfies the DOM type exactly, at the cost of one small
+      // copy (this file's audio is already small after extraction).
+      body: new Uint8Array(wavBytes),
       // Audio-only upload, already downmixed and small — no need for the
       // long timeouts the direct-video Gemini calls need.
       signal: AbortSignal.timeout(60_000),
