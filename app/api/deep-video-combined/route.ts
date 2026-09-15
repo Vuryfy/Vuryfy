@@ -152,8 +152,14 @@ export async function POST(request: Request) {
       { user_id: user.id, credit_type: "deep_investigation", amount: 1, reason: "deep_investigation_refunded_infra_error" },
     ]);
 
+    // Sept 15, 2026 bug fix: see app/api/verify-video/route.ts's identical
+    // comment — deleting the Storage object on every failure (transient
+    // Gemini timeouts/503s included) meant no "Try Again" could ever
+    // actually work, confirmed via a real live test. Only the transient
+    // Gemini file is cleaned up here now; the Storage object survives so a
+    // real retry can reuse it.
     const isStorageError = err instanceof VideoStorageError;
-    await cleanupVideoFile(admin, storagePath, geminiFileName, true);
+    await cleanupVideoFile(admin, storagePath, geminiFileName, false);
     return NextResponse.json(
       {
         error: isStorageError ? err.message : "Try Again",

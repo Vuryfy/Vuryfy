@@ -139,8 +139,22 @@ export async function POST(request: Request) {
       { user_id: user.id, credit_type: "quick_check", amount: 1, reason: "quick_check_refunded_infra_error" },
     ]);
 
+    // Sept 15, 2026 bug fix: this used to pass deleteStorage=true here too,
+    // deleting the Storage object on ANY failure — including a transient
+    // Gemini timeout/503 that has nothing wrong with the uploaded video
+    // itself. That meant the very first failed attempt permanently
+    // destroyed the upload, so every subsequent "Try Again" click (the
+    // route's own error message!) was guaranteed to fail with "That upload
+    // could not be found" — confirmed via a real live test that hit exactly
+    // this sequence. Only the transient Gemini File API upload is cleaned
+    // up here now; the Storage object survives a failed attempt so a real
+    // retry can reuse it without asking the browser to re-upload the whole
+    // file. It's still deleted on eventual success (see below) or via the
+    // client's own best-effort delete on "Choose another" — an abandoned
+    // failed upload isn't orphaned forever, just not destroyed on the first
+    // hiccup.
     const isStorageError = err instanceof VideoStorageError;
-    await cleanupVideoFile(admin, storagePath, geminiFileName, true);
+    await cleanupVideoFile(admin, storagePath, geminiFileName, false);
     return NextResponse.json(
       {
         error: isStorageError ? err.message : "Try Again",
