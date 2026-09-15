@@ -4,6 +4,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { runVideoQuickCheck, VIDEO_QUICK_ENGINE_VERSION, type VideoAnalysisResult } from "@/lib/video-analysis";
 import { normalizeClaim } from "@/lib/quick-check";
 import {
+  downloadVideoFromStorage,
+  uploadDownloadedVideoToGemini,
+  cleanupVideoFile,
+  VideoStorageError,
+} from "@/lib/video-file-pipeline";
+import {
   computeCacheKey,
   getCachedVerification,
   writeCache,
@@ -11,12 +17,13 @@ import {
   type CachedVerification,
 } from "@/lib/verification-cache";
 
-// Route-level execution budget (Sept 2026 fix, see app/api/transcribe-
-// video/route.ts's comment for the full rationale): without this, Vercel
-// kills the function at its Hobby-plan default of 10 seconds — well under
-// the video Gemini call's own up-to-35s timeout — silently, with no JSON
-// error body, so the browser just hangs with no feedback. 60 is Hobby's max.
-export const maxDuration = 60;
+// Route-level execution budget — Sept 15, 2026: raised from 60s to 300s
+// (Pro's generally-available default/max under Fluid compute) now that
+// video supports multi-minute clips via direct-to-storage upload +
+// Gemini's File API rather than a small inline payload (see lib/video-
+// file-pipeline.ts, lib/gemini-file-upload.ts, and supabase/migrations/
+// 0009_temp_video_storage.sql for the full rework).
+export const maxDuration = 300;
 
 // Video authenticity Quick Check — mirrors app/api/verify-audio/route.ts as
 // closely as possible (see that file's header, and app/api/verify-image/
@@ -34,6 +41,17 @@ export const maxDuration = 60;
 // media file doesn't go stale the way a text claim about current events
 // does, and the 14-day TTL is just as reasonable a default here as it is
 // for audio), so a separate constant would only be duplication.
+//
+// Sept 15, 2026: storage_path replaces video_base64 (see lib/video-file-
+// pipeline.ts's header for the full rework). The cache key now hashes the
+// raw video bytes (sha256, computed while downloading from Storage) rather
+// than a base64 string of them — same exact-match idea, computed off
+// content already in memory anyway. A cache hit skips the Gemini File API
+// upload + analysis call entirely (only the Storage download still
+// happens, since the content hash can only come from the actual bytes).
+// This route is the terminal step for these bytes on the "video itself"
+// path — it deletes BOTH the Supabase Storage object and the Gemini File
+// API upload in a finally block, whether or not the request succeeded.
 const ALLOWED_MIME_TYPES = new Set([
   "video/mp4",
   "video/quicktime",
@@ -42,7 +60,6 @@ const ALLOWED_MIME_TYPES = new Set([
   "video/3gpp",
   "video/x-msvideo",
 ]);
-const MAX_BASE64_LENGTH = 4_200_000; // ~3MB raw video — see lib/prepare-video-upload.ts's header: this is capped by Vercel's hard 4.5MB request-body limit, not by Gemini
 
 export async function POST(request: Request) {
   const supabase = await createServerSupabase();
@@ -55,22 +72,21 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json().catch(() => null);
-  const videoBase64: string = body?.video_base64 ?? "";
+  const storagePath: string = body?.storage_path ?? "";
   const mimeType: string = body?.mime_type ?? "";
   const context: string = (body?.context ?? "").trim().slice(0, 500);
 
-  if (!videoBase64) {
+  if (!storagePath) {
     return NextResponse.json({ error: "No video was provided." }, { status: 400 });
   }
-  if (videoBase64.length > MAX_BASE64_LENGTH) {
-    return NextResponse.json({ error: "That video is too large for this request (limit is a few seconds of video, ~3MB, due to a Vercel platform limit). Try a shorter clip." }, { status: 400 });
+  if (!storagePath.startsWith(`${user.id}/`)) {
+    return NextResponse.json({ error: "That upload doesn't belong to this account." }, { status: 403 });
   }
   if (!ALLOWED_MIME_TYPES.has(mimeType)) {
     return NextResponse.json({ error: "Unsupported video type." }, { status: 400 });
   }
 
   const admin = createAdminClient();
-  const cacheKey = computeCacheKey(`${videoBase64}|ctx:${context}`, "video", VIDEO_QUICK_ENGINE_VERSION);
 
   const { data: remaining, error: rpcError } = await admin.rpc("decrement_quick_check", {
     p_user_id: user.id,
@@ -91,38 +107,49 @@ export async function POST(request: Request) {
     );
   }
 
-  const cached = await getCachedVerification(admin, cacheKey);
-  const cacheHit = cached !== null;
-
+  let geminiFileName: string | undefined;
   let result: VideoAnalysisResult | CachedVerification;
-  if (cached) {
-    result = cached;
-  } else {
-    try {
-      result = await runVideoQuickCheck(videoBase64, mimeType, context || null);
-    } catch (err) {
-      console.error("[verify-video] pipeline failed (refunding credit):", err);
+  let cacheKey: string;
+  let cacheHit: boolean;
 
-      const { error: refundError } = await admin.rpc("refund_quick_check", { p_user_id: user.id });
-      if (refundError) {
-        console.error("[verify-video] refund_quick_check RPC ALSO failed:", refundError);
-      }
+  try {
+    const { bytes, contentHash } = await downloadVideoFromStorage(admin, storagePath);
+    cacheKey = computeCacheKey(`sha256:${contentHash}|ctx:${context}`, "video", VIDEO_QUICK_ENGINE_VERSION);
 
-      await admin.from("credit_transactions").insert([
-        { user_id: user.id, credit_type: "quick_check", amount: -1, reason: "quick_check_reserved" },
-        { user_id: user.id, credit_type: "quick_check", amount: 1, reason: "quick_check_refunded_infra_error" },
-      ]);
+    const cached = await getCachedVerification(admin, cacheKey);
+    cacheHit = cached !== null;
 
-      return NextResponse.json(
-        {
-          error: "Try Again",
-          ...(process.env.NODE_ENV !== "production"
-            ? { debug: { message: err instanceof Error ? err.message : String(err) } }
-            : {}),
-        },
-        { status: 502 }
-      );
+    if (cached) {
+      result = cached;
+    } else {
+      const geminiFile = await uploadDownloadedVideoToGemini(bytes, mimeType);
+      geminiFileName = geminiFile.name;
+      result = await runVideoQuickCheck(geminiFile.fileUri, mimeType, context || null);
     }
+  } catch (err) {
+    console.error("[verify-video] pipeline failed (refunding credit):", err);
+
+    const { error: refundError } = await admin.rpc("refund_quick_check", { p_user_id: user.id });
+    if (refundError) {
+      console.error("[verify-video] refund_quick_check RPC ALSO failed:", refundError);
+    }
+
+    await admin.from("credit_transactions").insert([
+      { user_id: user.id, credit_type: "quick_check", amount: -1, reason: "quick_check_reserved" },
+      { user_id: user.id, credit_type: "quick_check", amount: 1, reason: "quick_check_refunded_infra_error" },
+    ]);
+
+    const isStorageError = err instanceof VideoStorageError;
+    await cleanupVideoFile(admin, storagePath, geminiFileName, true);
+    return NextResponse.json(
+      {
+        error: isStorageError ? err.message : "Try Again",
+        ...(process.env.NODE_ENV !== "production" && !isStorageError
+          ? { debug: { message: err instanceof Error ? err.message : String(err) } }
+          : {}),
+      },
+      { status: isStorageError ? 400 : 502 }
+    );
   }
 
   const claimText = context || "[Video submitted for authenticity analysis]";
@@ -149,6 +176,7 @@ export async function POST(request: Request) {
 
   if (insertError || !verification) {
     console.error("[verify-video] verifications insert failed:", insertError);
+    await cleanupVideoFile(admin, storagePath, geminiFileName, true);
     return NextResponse.json(
       {
         error: "Analysis ran but couldn't be saved. Please try again.",
@@ -180,6 +208,8 @@ export async function POST(request: Request) {
     .select("quick_checks_remaining, deep_investigations_remaining")
     .eq("user_id", user.id)
     .single();
+
+  await cleanupVideoFile(admin, storagePath, geminiFileName, true);
 
   return NextResponse.json({
     id: verification.id,

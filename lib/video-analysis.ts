@@ -52,11 +52,17 @@ import type { QuickCheckEvidence } from "@/lib/quick-check";
 // contains_face flags which signal set is most relevant, mirroring
 // contains_speech in audio-analysis.ts.
 //
-// Media retention (Part 15): the video reaches the server and the AI
-// provider as inline base64 data and is NEVER written to Supabase storage
-// or any other persistence layer by this file or its callers — exists only
-// in server memory for the duration of the request, same principle as
-// image and audio analysis.
+// Media retention (Part 15): this file itself never writes video content
+// anywhere — same principle as image and audio analysis. As of Sept 15,
+// 2026, the video briefly touches TWO storage points before reaching this
+// file: Supabase Storage (uploaded directly by the browser to bypass
+// Vercel's 4.5MB request body limit) and Gemini's File API (re-uploaded
+// server-side, since Gemini's inline-request limit no longer fits the
+// raised size cap either). Neither is meant to persist — see
+// supabase/migrations/0009_temp_video_storage.sql and
+// lib/gemini-file-upload.ts's headers for how each is cleaned up. This
+// file only ever receives an already-uploaded Gemini file reference
+// (fileUri), never raw bytes.
 //
 // Caching: reuses the same exact-match cache as audio (keyed on the video
 // content itself, not a text claim) — see app/api/verify-video/route.ts.
@@ -221,8 +227,15 @@ function toResult(data: VideoOutput, engineVersion: string): VideoAnalysisResult
   };
 }
 
+// fileUri comes from lib/gemini-file-upload.ts's uploadVideoToGemini() —
+// the route handler owns the upload and the post-use cleanup (deleting
+// both the Gemini file and the Supabase Storage object), not this
+// function. timeoutMs raised from the old 35s: a several-minutes-long clip
+// genuinely takes longer for the model to work through than the old
+// short-clip cap ever needed to accommodate, and Pro's maxDuration ceiling
+// (see the video routes) now has real headroom for it.
 export async function runVideoQuickCheck(
-  videoBase64: string,
+  fileUri: string,
   mimeType: string,
   context: string | null
 ): Promise<VideoAnalysisResult> {
@@ -231,14 +244,14 @@ export async function runVideoQuickCheck(
     systemPrompt: QUICK_SYSTEM_PROMPT,
     userPrompt: buildUserPrompt(context),
     responseSchema: VIDEO_SCHEMA,
-    videoParts: [{ mimeType, data: videoBase64 }],
-    timeoutMs: 35_000, // video is the heaviest media type to process; still bounded
+    videoFileRef: { fileUri, mimeType },
+    timeoutMs: 120_000,
   });
   return toResult(data, VIDEO_QUICK_ENGINE_VERSION);
 }
 
 export async function runVideoDeepInvestigation(
-  videoBase64: string,
+  fileUri: string,
   mimeType: string,
   context: string | null
 ): Promise<VideoAnalysisResult> {
@@ -247,8 +260,8 @@ export async function runVideoDeepInvestigation(
     systemPrompt: DEEP_SYSTEM_PROMPT,
     userPrompt: buildUserPrompt(context),
     responseSchema: VIDEO_SCHEMA,
-    videoParts: [{ mimeType, data: videoBase64 }],
-    timeoutMs: 40_000,
+    videoFileRef: { fileUri, mimeType },
+    timeoutMs: 150_000,
   });
   return toResult(data, VIDEO_DEEP_ENGINE_VERSION);
 }

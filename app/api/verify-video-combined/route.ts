@@ -4,6 +4,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { runQuickCheck, normalizeClaim, ENGINE_VERSION, type QuickCheckResult } from "@/lib/quick-check";
 import { runVideoQuickCheck, VIDEO_QUICK_ENGINE_VERSION, type VideoAnalysisResult } from "@/lib/video-analysis";
 import {
+  downloadVideoFromStorage,
+  uploadDownloadedVideoToGemini,
+  cleanupVideoFile,
+  VideoStorageError,
+} from "@/lib/video-file-pipeline";
+import {
   computeCacheKey,
   getCachedVerification,
   writeCache,
@@ -11,13 +17,14 @@ import {
   type CachedVerification,
 } from "@/lib/verification-cache";
 
-// Route-level execution budget (Sept 2026 fix, see app/api/transcribe-
-// video/route.ts's comment for the full rationale): without this, Vercel
-// kills the function at its Hobby-plan default of 10 seconds — well under
-// even the FASTER of the two parallel calls this route makes (the text
-// pipeline and the up-to-35s video Gemini call) — silently, with no JSON
-// error body, so the browser just hangs with no feedback. 60 is Hobby's max.
-export const maxDuration = 60;
+// Route-level execution budget — Sept 15, 2026: raised from 60s to 300s
+// (Pro's generally-available default/max under Fluid compute) — see
+// app/api/verify-video/route.ts's comment for the full rationale. This
+// route runs two AI pipelines in parallel (text + video), so it's exposed
+// to the same Storage-download/Gemini-upload latency as the video-only
+// route, plus the text pipeline running alongside it — 300s covers both
+// comfortably.
+export const maxDuration = 300;
 
 // Combined video Quick Check — mirrors app/api/verify-audio-combined/
 // route.ts exactly, one level down (see that file's header for the full
@@ -34,6 +41,17 @@ export const maxDuration = 60;
 // The response bundles both under the optional `secondary` field that
 // app/result/page.tsx already renders generically (built for audio, reused
 // unchanged here).
+//
+// Sept 15, 2026: storage_path replaces video_base64 (see lib/video-file-
+// pipeline.ts's header for the full rework). This route downloads the
+// video from Storage ONCE (needed either way, since the video cache key is
+// a hash of its own content), computes the video cache key from that hash,
+// then — only on a video cache miss — uploads to Gemini's File API and
+// runs the authenticity analysis in parallel with the (separately cached)
+// text pipeline on the transcript. This is the terminal step for these
+// bytes: deletes both the Supabase Storage object and the Gemini File API
+// upload in a finally-equivalent cleanup, whether or not the request
+// succeeded.
 const ALLOWED_MIME_TYPES = new Set([
   "video/mp4",
   "video/quicktime",
@@ -42,7 +60,6 @@ const ALLOWED_MIME_TYPES = new Set([
   "video/3gpp",
   "video/x-msvideo",
 ]);
-const MAX_BASE64_LENGTH = 4_200_000; // ~3MB raw video — see lib/prepare-video-upload.ts's header: this is capped by Vercel's hard 4.5MB request-body limit, not by Gemini
 
 export async function POST(request: Request) {
   const supabase = await createServerSupabase();
@@ -55,16 +72,16 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json().catch(() => null);
-  const videoBase64: string = body?.video_base64 ?? "";
+  const storagePath: string = body?.storage_path ?? "";
   const mimeType: string = body?.mime_type ?? "";
   const transcript: string = (body?.transcript ?? "").trim();
   const context: string = (body?.context ?? "").trim().slice(0, 500);
 
-  if (!videoBase64) {
+  if (!storagePath) {
     return NextResponse.json({ error: "No video was provided." }, { status: 400 });
   }
-  if (videoBase64.length > MAX_BASE64_LENGTH) {
-    return NextResponse.json({ error: "That video is too large for this request (limit is a few seconds of video, ~3MB, due to a Vercel platform limit). Try a shorter clip." }, { status: 400 });
+  if (!storagePath.startsWith(`${user.id}/`)) {
+    return NextResponse.json({ error: "That upload doesn't belong to this account." }, { status: 403 });
   }
   if (!ALLOWED_MIME_TYPES.has(mimeType)) {
     return NextResponse.json({ error: "Unsupported video type." }, { status: 400 });
@@ -82,7 +99,6 @@ export async function POST(request: Request) {
   const admin = createAdminClient();
   const normalizedTranscript = normalizeClaim(transcript);
   const textCacheKey = computeCacheKey(normalizedTranscript, "video_transcript", ENGINE_VERSION);
-  const videoCacheKey = computeCacheKey(`${videoBase64}|ctx:${context}`, "video", VIDEO_QUICK_ENGINE_VERSION);
 
   const { data: remaining, error: rpcError } = await admin.rpc("decrement_quick_check", {
     p_user_id: user.id,
@@ -102,19 +118,35 @@ export async function POST(request: Request) {
     );
   }
 
-  const [textCached, videoCached] = await Promise.all([
-    getCachedVerification(admin, textCacheKey),
-    getCachedVerification(admin, videoCacheKey),
-  ]);
-  const textCacheHit = textCached !== null;
-  const videoCacheHit = videoCached !== null;
-
+  let geminiFileName: string | undefined;
   let textResult: QuickCheckResult | CachedVerification;
   let videoResult: VideoAnalysisResult | CachedVerification;
+  let videoCacheKey: string;
+  let textCacheHit: boolean;
+  let videoCacheHit: boolean;
+  let textCachedAt: string | null = null;
+
   try {
+    const { bytes, contentHash } = await downloadVideoFromStorage(admin, storagePath);
+    videoCacheKey = computeCacheKey(`sha256:${contentHash}|ctx:${context}`, "video", VIDEO_QUICK_ENGINE_VERSION);
+
+    const [textCached, videoCached] = await Promise.all([
+      getCachedVerification(admin, textCacheKey),
+      getCachedVerification(admin, videoCacheKey),
+    ]);
+    textCacheHit = textCached !== null;
+    videoCacheHit = videoCached !== null;
+    textCachedAt = textCached?.cached_at ?? null;
+
     const [freshText, freshVideo] = await Promise.all([
       textCached ? Promise.resolve(null) : runQuickCheck(transcript),
-      videoCached ? Promise.resolve(null) : runVideoQuickCheck(videoBase64, mimeType, context || null),
+      videoCached
+        ? Promise.resolve(null)
+        : (async () => {
+            const geminiFile = await uploadDownloadedVideoToGemini(bytes, mimeType);
+            geminiFileName = geminiFile.name;
+            return runVideoQuickCheck(geminiFile.fileUri, mimeType, context || null);
+          })(),
     ]);
     textResult = textCached ?? (freshText as QuickCheckResult);
     videoResult = videoCached ?? (freshVideo as VideoAnalysisResult);
@@ -131,14 +163,16 @@ export async function POST(request: Request) {
       { user_id: user.id, credit_type: "quick_check", amount: 1, reason: "quick_check_refunded_infra_error" },
     ]);
 
+    const isStorageError = err instanceof VideoStorageError;
+    await cleanupVideoFile(admin, storagePath, geminiFileName, true);
     return NextResponse.json(
       {
-        error: "Try Again",
-        ...(process.env.NODE_ENV !== "production"
+        error: isStorageError ? err.message : "Try Again",
+        ...(process.env.NODE_ENV !== "production" && !isStorageError
           ? { debug: { message: err instanceof Error ? err.message : String(err) } }
           : {}),
       },
-      { status: 502 }
+      { status: isStorageError ? 400 : 502 }
     );
   }
 
@@ -164,6 +198,7 @@ export async function POST(request: Request) {
 
   if (insertError1 || !transcriptRow) {
     console.error("[verify-video-combined] transcript verifications insert failed:", insertError1);
+    await cleanupVideoFile(admin, storagePath, geminiFileName, true);
     return NextResponse.json(
       { error: "Check ran but couldn't be saved. Please try again." },
       { status: 500 }
@@ -217,6 +252,8 @@ export async function POST(request: Request) {
     .eq("user_id", user.id)
     .single();
 
+  await cleanupVideoFile(admin, storagePath, geminiFileName, true);
+
   return NextResponse.json({
     id: transcriptRow.id,
     mode: "quick",
@@ -227,7 +264,7 @@ export async function POST(request: Request) {
     evidence: transcriptRow.key_evidence,
     sources: transcriptRow.sources,
     cached: textCacheHit,
-    cached_at: textCacheHit ? (textCached as CachedVerification).cached_at : null,
+    cached_at: textCacheHit ? textCachedAt : null,
     secondary: videoRow
       ? {
           id: videoRow.id,

@@ -54,13 +54,18 @@
 // lib/video-transcript.ts (transcription) and lib/video-analysis.ts
 // (authenticity/deepfake analysis); every other caller is unaffected.
 //
-// Inline video has a real size/duration ceiling worth being explicit about:
-// this stays well under Gemini's inline-request payload limit by capping
-// client-side upload size (see lib/prepare-video-upload.ts) rather than
-// switching to Gemini's separate File API, which would add real complexity
-// (upload-then-reference across two calls, cleanup) for a V1 that's
-// deliberately scoped to short clips. Revisit only if real usage shows
-// people need to check longer videos than that cap allows.
+// Gemini File API support (added Sept 15, 2026, superseding the "revisit
+// only if real usage shows..." note above — the user explicitly asked for
+// 3-5+ minute video support): videoParts (inlineData) stays in place for
+// any future small-payload caller, but video's own callers
+// (lib/video-transcript.ts, lib/video-analysis.ts) now exclusively use the
+// new videoFileRef param below instead. A video that size can't fit
+// Gemini's inline-request limit (100MB total, less once base64-inflated)
+// the way a short clip could — see lib/gemini-file-upload.ts for the
+// upload/cleanup mechanics. videoFileRef sends Gemini a `fileData` part
+// (fileUri + mimeType) instead of an `inlineData` part — a different shape
+// Gemini's generateContent accepts for content already uploaded via its
+// File API.
 
 const GEMINI_MODEL = "gemini-3.1-flash-lite";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -82,6 +87,17 @@ export type AudioPart = ImagePart;
 // Same shape again, same reasoning — see AudioPart above.
 export type VideoPart = ImagePart;
 
+// A reference to a file already uploaded via Gemini's File API (see
+// lib/gemini-file-upload.ts), rather than raw inline bytes — the shape
+// Gemini's generateContent expects is a `fileData` part (fileUri +
+// mimeType) instead of `inlineData` (mimeType + base64 data). Video's own
+// callers use this exclusively now; kept distinct from VideoPart since the
+// two are not interchangeable at the request level.
+export interface VideoFileRef {
+  fileUri: string;
+  mimeType: string;
+}
+
 export interface StructuredCallParams {
   tier: ModelTier;
   systemPrompt: string;
@@ -91,6 +107,7 @@ export interface StructuredCallParams {
   imageParts?: ImagePart[];
   audioParts?: AudioPart[];
   videoParts?: VideoPart[];
+  videoFileRef?: VideoFileRef;
   timeoutMs?: number;
 }
 
@@ -148,6 +165,9 @@ async function attemptCall<T>(params: StructuredCallParams, apiKey: string): Pro
     ...(params.imageParts ?? []).map((p) => ({ inlineData: { mimeType: p.mimeType, data: p.data } })),
     ...(params.audioParts ?? []).map((p) => ({ inlineData: { mimeType: p.mimeType, data: p.data } })),
     ...(params.videoParts ?? []).map((p) => ({ inlineData: { mimeType: p.mimeType, data: p.data } })),
+    ...(params.videoFileRef
+      ? [{ fileData: { fileUri: params.videoFileRef.fileUri, mimeType: params.videoFileRef.mimeType } }]
+      : []),
     { text: params.userPrompt },
   ];
 

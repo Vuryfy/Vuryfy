@@ -5,6 +5,12 @@ import { runDeepInvestigation, DEEP_ENGINE_VERSION, type DeepInvestigationResult
 import { normalizeClaim } from "@/lib/quick-check";
 import { runVideoDeepInvestigation, VIDEO_DEEP_ENGINE_VERSION, type VideoAnalysisResult } from "@/lib/video-analysis";
 import {
+  downloadVideoFromStorage,
+  uploadDownloadedVideoToGemini,
+  cleanupVideoFile,
+  VideoStorageError,
+} from "@/lib/video-file-pipeline";
+import {
   computeCacheKey,
   getCachedVerification,
   writeCache,
@@ -12,13 +18,10 @@ import {
   type CachedVerification,
 } from "@/lib/verification-cache";
 
-// Route-level execution budget (Sept 2026 fix, see app/api/transcribe-
-// video/route.ts's comment for the full rationale): without this, Vercel
-// kills the function at its Hobby-plan default of 10 seconds — well under
-// even the FASTER of the two parallel calls this route makes (the text
-// pipeline and the up-to-40s video Gemini call) — silently, with no JSON
-// error body, so the browser just hangs with no feedback. 60 is Hobby's max.
-export const maxDuration = 60;
+// Route-level execution budget — Sept 15, 2026: raised from 60s to 300s
+// (Pro's generally-available default/max under Fluid compute) — see
+// app/api/verify-video/route.ts's comment for the full rationale.
+export const maxDuration = 300;
 
 // Combined video Deep Investigation — mirrors app/api/deep-audio-combined/
 // route.ts exactly, one level down (see app/api/verify-video-combined/
@@ -29,6 +32,9 @@ export const maxDuration = 60;
 // refund_deep_investigation, and including caveats on the transcript row
 // too (Deep Investigation's text pipeline produces caveats; Quick Check's
 // doesn't).
+//
+// Sept 15, 2026: storage_path/content-hash-cache-key rework — see
+// app/api/verify-video-combined/route.ts's header for the full rationale.
 const ALLOWED_MIME_TYPES = new Set([
   "video/mp4",
   "video/quicktime",
@@ -37,7 +43,6 @@ const ALLOWED_MIME_TYPES = new Set([
   "video/3gpp",
   "video/x-msvideo",
 ]);
-const MAX_BASE64_LENGTH = 4_200_000; // ~3MB raw video — see lib/prepare-video-upload.ts's header: this is capped by Vercel's hard 4.5MB request-body limit, not by Gemini
 
 export async function POST(request: Request) {
   const supabase = await createServerSupabase();
@@ -50,16 +55,16 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json().catch(() => null);
-  const videoBase64: string = body?.video_base64 ?? "";
+  const storagePath: string = body?.storage_path ?? "";
   const mimeType: string = body?.mime_type ?? "";
   const transcript: string = (body?.transcript ?? "").trim();
   const context: string = (body?.context ?? "").trim().slice(0, 500);
 
-  if (!videoBase64) {
+  if (!storagePath) {
     return NextResponse.json({ error: "No video was provided." }, { status: 400 });
   }
-  if (videoBase64.length > MAX_BASE64_LENGTH) {
-    return NextResponse.json({ error: "That video is too large for this request (limit is a few seconds of video, ~3MB, due to a Vercel platform limit). Try a shorter clip." }, { status: 400 });
+  if (!storagePath.startsWith(`${user.id}/`)) {
+    return NextResponse.json({ error: "That upload doesn't belong to this account." }, { status: 403 });
   }
   if (!ALLOWED_MIME_TYPES.has(mimeType)) {
     return NextResponse.json({ error: "Unsupported video type." }, { status: 400 });
@@ -77,7 +82,6 @@ export async function POST(request: Request) {
   const admin = createAdminClient();
   const normalizedTranscript = normalizeClaim(transcript);
   const textCacheKey = computeCacheKey(normalizedTranscript, "video_transcript", DEEP_ENGINE_VERSION);
-  const videoCacheKey = computeCacheKey(`${videoBase64}|ctx:${context}`, "video", VIDEO_DEEP_ENGINE_VERSION);
 
   const { data: remaining, error: rpcError } = await admin.rpc("decrement_deep_investigation", {
     p_user_id: user.id,
@@ -97,19 +101,35 @@ export async function POST(request: Request) {
     );
   }
 
-  const [textCached, videoCached] = await Promise.all([
-    getCachedVerification(admin, textCacheKey),
-    getCachedVerification(admin, videoCacheKey),
-  ]);
-  const textCacheHit = textCached !== null;
-  const videoCacheHit = videoCached !== null;
-
+  let geminiFileName: string | undefined;
   let textResult: DeepInvestigationResult | CachedVerification;
   let videoResult: VideoAnalysisResult | CachedVerification;
+  let videoCacheKey: string;
+  let textCacheHit: boolean;
+  let videoCacheHit: boolean;
+  let textCachedAt: string | null = null;
+
   try {
+    const { bytes, contentHash } = await downloadVideoFromStorage(admin, storagePath);
+    videoCacheKey = computeCacheKey(`sha256:${contentHash}|ctx:${context}`, "video", VIDEO_DEEP_ENGINE_VERSION);
+
+    const [textCached, videoCached] = await Promise.all([
+      getCachedVerification(admin, textCacheKey),
+      getCachedVerification(admin, videoCacheKey),
+    ]);
+    textCacheHit = textCached !== null;
+    videoCacheHit = videoCached !== null;
+    textCachedAt = textCached?.cached_at ?? null;
+
     const [freshText, freshVideo] = await Promise.all([
       textCached ? Promise.resolve(null) : runDeepInvestigation(transcript),
-      videoCached ? Promise.resolve(null) : runVideoDeepInvestigation(videoBase64, mimeType, context || null),
+      videoCached
+        ? Promise.resolve(null)
+        : (async () => {
+            const geminiFile = await uploadDownloadedVideoToGemini(bytes, mimeType);
+            geminiFileName = geminiFile.name;
+            return runVideoDeepInvestigation(geminiFile.fileUri, mimeType, context || null);
+          })(),
     ]);
     textResult = textCached ?? (freshText as DeepInvestigationResult);
     videoResult = videoCached ?? (freshVideo as VideoAnalysisResult);
@@ -126,14 +146,16 @@ export async function POST(request: Request) {
       { user_id: user.id, credit_type: "deep_investigation", amount: 1, reason: "deep_investigation_refunded_infra_error" },
     ]);
 
+    const isStorageError = err instanceof VideoStorageError;
+    await cleanupVideoFile(admin, storagePath, geminiFileName, true);
     return NextResponse.json(
       {
-        error: "Try Again",
-        ...(process.env.NODE_ENV !== "production"
+        error: isStorageError ? err.message : "Try Again",
+        ...(process.env.NODE_ENV !== "production" && !isStorageError
           ? { debug: { message: err instanceof Error ? err.message : String(err) } }
           : {}),
       },
-      { status: 502 }
+      { status: isStorageError ? 400 : 502 }
     );
   }
 
@@ -161,6 +183,7 @@ export async function POST(request: Request) {
 
   if (insertError1 || !transcriptRow) {
     console.error("[deep-video-combined] transcript verifications insert failed:", insertError1);
+    await cleanupVideoFile(admin, storagePath, geminiFileName, true);
     return NextResponse.json(
       { error: "Investigation ran but couldn't be saved. Please try again." },
       { status: 500 }
@@ -215,6 +238,8 @@ export async function POST(request: Request) {
     .eq("user_id", user.id)
     .single();
 
+  await cleanupVideoFile(admin, storagePath, geminiFileName, true);
+
   return NextResponse.json({
     id: transcriptRow.id,
     mode: "deep",
@@ -226,7 +251,7 @@ export async function POST(request: Request) {
     sources: transcriptRow.sources,
     caveats: transcriptRow.caveats,
     cached: textCacheHit,
-    cached_at: textCacheHit ? (textCached as CachedVerification).cached_at : null,
+    cached_at: textCacheHit ? textCachedAt : null,
     secondary: videoRow
       ? {
           id: videoRow.id,

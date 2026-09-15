@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
-import { prepareVideoForUpload, type PreparedVideo } from "@/lib/prepare-video-upload";
+import { uploadVideoToStorage, deleteUploadedVideo, type UploadedVideo } from "@/lib/prepare-video-upload";
 
 // Video input — the last step in the locked media-type build order (text +
 // link -> QR -> image -> audio -> video), shipping after audio per the
@@ -14,21 +14,31 @@ import { prepareVideoForUpload, type PreparedVideo } from "@/lib/prepare-video-u
 // later.
 //
 // Same free-preview-then-charge shape as audio: choosing a video triggers
-// a brief "Transcribing…" step (video's audio track, via
-// /api/transcribe-video) before the transcript block appears — no credit
-// charged until a Quick Check or Deep Investigation button is explicitly
-// pressed. When a transcript is found, ONE Quick Check button and ONE Deep
-// Investigation button run both the transcript fact-check and the video
-// authenticity/deepfake analysis together (1 credit total). When no speech
-// is found, only the video-only authenticity check is offered.
+// an upload step followed by a brief "Transcribing…" step (video's audio
+// track, via /api/transcribe-video) before the transcript block appears —
+// no credit charged until a Quick Check or Deep Investigation button is
+// explicitly pressed. When a transcript is found, ONE Quick Check button
+// and ONE Deep Investigation button run both the transcript fact-check and
+// the video authenticity/deepfake analysis together (1 credit total). When
+// no speech is found, only the video-only authenticity check is offered.
+//
+// Sept 15, 2026: the video now uploads DIRECTLY to Supabase Storage (see
+// lib/prepare-video-upload.ts's header for the full rework — a real user
+// request for 3-5+ minute video support that the old inline-base64
+// approach could never accommodate). The uploaded storage path is kept in
+// state and reused across both the free transcribe call and the
+// subsequent paid check call, rather than re-uploading the file a second
+// time — the server deletes the underlying Storage object after the
+// terminal check call (see the API routes' own headers).
 export default function VerifyVideoPage() {
   const router = useRouter();
   const supabase = createClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const [uploading, setUploading] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [processError, setProcessError] = useState("");
-  const [prepared, setPrepared] = useState<PreparedVideo | null>(null);
+  const [uploaded, setUploaded] = useState<UploadedVideo | null>(null);
   const [transcript, setTranscript] = useState<string | null>(null);
   const [noSpeechFound, setNoSpeechFound] = useState(false);
   const [context, setContext] = useState("");
@@ -44,19 +54,22 @@ export default function VerifyVideoPage() {
   }, [router, supabase]);
 
   async function handleFile(file: File) {
-    setProcessing(true);
+    setUploading(true);
+    setProcessing(false);
     setProcessError("");
     setTranscript(null);
     setNoSpeechFound(false);
     setSubmitError("");
     try {
-      const video = await prepareVideoForUpload(file);
-      setPrepared(video);
+      const video = await uploadVideoToStorage(file, supabase);
+      setUploaded(video);
+      setUploading(false);
+      setProcessing(true);
 
       const r = await fetch("/api/transcribe-video", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ video_base64: video.base64, mime_type: video.mimeType }),
+        body: JSON.stringify({ storage_path: video.storagePath, mime_type: video.mimeType }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "Transcription failed");
@@ -68,6 +81,7 @@ export default function VerifyVideoPage() {
     } catch (e: any) {
       setProcessError(e.message || "Couldn't process that video file. Try a different file.");
     } finally {
+      setUploading(false);
       setProcessing(false);
     }
   }
@@ -75,7 +89,7 @@ export default function VerifyVideoPage() {
   // Combined check — runs both the transcript fact-check and the video
   // authenticity/deepfake analysis from one button, one credit charge.
   async function submitCombined(mode: "quick" | "deep") {
-    if (!transcript || !prepared) return;
+    if (!transcript || !uploaded) return;
     setSubmitting(mode === "quick" ? "combined-quick" : "combined-deep");
     setSubmitError("");
     try {
@@ -84,8 +98,8 @@ export default function VerifyVideoPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          video_base64: prepared.base64,
-          mime_type: prepared.mimeType,
+          storage_path: uploaded.storagePath,
+          mime_type: uploaded.mimeType,
           transcript,
           context: context.trim(),
         }),
@@ -104,7 +118,7 @@ export default function VerifyVideoPage() {
   // Video-only check — used only when no speech was found, so there's
   // nothing to combine with.
   async function submitVideo(mode: "quick" | "deep") {
-    if (!prepared) return;
+    if (!uploaded) return;
     setSubmitting(mode === "quick" ? "video-quick" : "video-deep");
     setSubmitError("");
     try {
@@ -113,8 +127,8 @@ export default function VerifyVideoPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          video_base64: prepared.base64,
-          mime_type: prepared.mimeType,
+          storage_path: uploaded.storagePath,
+          mime_type: uploaded.mimeType,
           context: context.trim(),
         }),
       });
@@ -130,7 +144,15 @@ export default function VerifyVideoPage() {
   }
 
   function reset() {
-    setPrepared(null);
+    // Best-effort cleanup: if the user is walking away without ever
+    // running a check, delete the temp upload now rather than leaving it
+    // for the video content to just sit there (see lib/prepare-video-
+    // upload.ts's header — there's no scheduled cleanup job in V1, so this
+    // is the main opportunistic cleanup path for an abandoned upload).
+    if (uploaded) {
+      deleteUploadedVideo(uploaded.storagePath, supabase);
+    }
+    setUploaded(null);
     setTranscript(null);
     setNoSpeechFound(false);
     setContext("");
@@ -139,7 +161,7 @@ export default function VerifyVideoPage() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  const hasVideo = !!prepared;
+  const hasVideo = !!uploaded;
   const anySubmitting = !!submitting;
 
   return (
@@ -154,11 +176,10 @@ export default function VerifyVideoPage() {
         <p className="eyebrow">VIDEO</p>
         <h1>Check a video.</h1>
         <p className="sub">
-          Upload a very short video clip (under ~3MB — a platform limit on request size means this
-          only fits a few seconds of typical phone video right now). If we can make out speech,
-          we&apos;ll transcribe it so you can check what&apos;s said, and we&apos;ll also watch the
-          video itself for signs of deepfakes, face-swaps, or AI-generated footage — both from the
-          same check.
+          Upload a video clip — up to 250MB, so several minutes of typical phone video. If we can
+          make out speech, we&apos;ll transcribe it so you can check what&apos;s said, and
+          we&apos;ll also watch the video itself for signs of deepfakes, face-swaps, or
+          AI-generated footage — both from the same check.
         </p>
 
         {!hasVideo && (
@@ -175,7 +196,7 @@ export default function VerifyVideoPage() {
               }}
             />
             <label htmlFor="video-file" className="primary-link">
-              {processing ? "Processing…" : "Choose a video"}
+              {uploading ? "Uploading…" : processing ? "Processing…" : "Choose a video"}
             </label>
             {processError && <p className="error">{processError}</p>}
             <p className="hint">
@@ -187,6 +208,7 @@ export default function VerifyVideoPage() {
           </>
         )}
 
+        {hasVideo && uploading && <p className="hint">Uploading…</p>}
         {hasVideo && processing && <p className="hint">Transcribing…</p>}
 
         {hasVideo && !processing && transcript && (

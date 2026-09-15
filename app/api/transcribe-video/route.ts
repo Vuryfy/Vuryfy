@@ -1,18 +1,25 @@
 import { NextResponse } from "next/server";
 import { createClient as createServerSupabase } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { transcribeVideoSpeech } from "@/lib/video-transcript";
+import {
+  downloadVideoFromStorage,
+  uploadDownloadedVideoToGemini,
+  cleanupVideoFile,
+  VideoStorageError,
+} from "@/lib/video-file-pipeline";
 
-// Route-level execution budget (Sept 2026 fix): without this, Vercel kills
-// the function at its platform default — 10 seconds on Hobby — long before
-// the Gemini call (up to 30s, see video-transcript.ts) can ever finish.
-// That kill is silent from the browser's side: no JSON error body comes
-// back, so a real user just sees the request hang forever with no
-// feedback. 60 is the maximum allowed on Hobby, giving real headroom above
-// the in-app timeout plus request overhead (auth check, base64 parsing).
-// Audio's routes have run under the unset 10s default without this
-// surfacing, since a much smaller audio-only payload usually finishes
-// well under it — video's larger payload routinely does not.
-export const maxDuration = 60;
+// Route-level execution budget — Sept 15, 2026: raised from 60s to 300s
+// (Pro's generally-available default/max under Fluid compute — confirmed
+// current on the Vercel Functions docs the same day this changed) now
+// that video supports multi-minute clips via direct-to-storage upload +
+// Gemini's File API rather than a small inline payload (see lib/video-
+// file-pipeline.ts, lib/gemini-file-upload.ts, and supabase/migrations/
+// 0009_temp_video_storage.sql). Downloading a large file from Storage,
+// re-uploading it to Gemini, and waiting for Gemini to process it all take
+// real, size-dependent time now — 60s was comfortable margin for the old
+// ~3MB clip cap but not for several minutes of video.
+export const maxDuration = 300;
 
 // Free preview step for video input's transcript sub-path — mirrors
 // app/api/transcribe-audio/route.ts exactly (see that file's header for
@@ -22,6 +29,17 @@ export const maxDuration = 60;
 // deciding whether to spend a Quick Check or Deep Investigation credit
 // checking it, via /api/verify or /api/deep with
 // input_type: "video_transcript".
+//
+// Sept 15, 2026: takes a Supabase Storage path instead of inline base64
+// (see the migration/pipeline files above for the full rework — driven by
+// a real user request for 3-5+ minute video support, which the old ~3MB
+// inline-body cap could never accommodate). This route deliberately does
+// NOT delete the Storage object after use — the follow-up Quick Check/
+// Deep Investigation call (verify-video-combined, deep-video-combined, or
+// the video-only routes if no speech was found) reuses the SAME uploaded
+// bytes rather than asking the browser to upload the whole file a second
+// time. Those routes own deleting it from Storage; this one only cleans
+// up its own temporary Gemini File API upload.
 const ALLOWED_MIME_TYPES = new Set([
   "video/mp4",
   "video/quicktime",
@@ -30,7 +48,6 @@ const ALLOWED_MIME_TYPES = new Set([
   "video/3gpp",
   "video/x-msvideo",
 ]);
-const MAX_BASE64_LENGTH = 4_200_000; // ~3MB raw video — see lib/prepare-video-upload.ts's header: this is capped by Vercel's hard 4.5MB request-body limit, not by Gemini
 
 export async function POST(request: Request) {
   const supabase = await createServerSupabase();
@@ -43,32 +60,41 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json().catch(() => null);
-  const videoBase64: string = body?.video_base64 ?? "";
+  const storagePath: string = body?.storage_path ?? "";
   const mimeType: string = body?.mime_type ?? "";
 
-  if (!videoBase64) {
+  if (!storagePath) {
     return NextResponse.json({ error: "No video was provided." }, { status: 400 });
   }
-  if (videoBase64.length > MAX_BASE64_LENGTH) {
-    return NextResponse.json({ error: "That video is too large for this request (limit is a few seconds of video, ~3MB, due to a Vercel platform limit). Try a shorter clip." }, { status: 400 });
+  if (!storagePath.startsWith(`${user.id}/`)) {
+    return NextResponse.json({ error: "That upload doesn't belong to this account." }, { status: 403 });
   }
   if (!ALLOWED_MIME_TYPES.has(mimeType)) {
     return NextResponse.json({ error: "Unsupported video type." }, { status: 400 });
   }
 
+  const admin = createAdminClient();
+  let geminiFileName: string | undefined;
+
   try {
-    const transcript = await transcribeVideoSpeech(videoBase64, mimeType);
+    const { bytes } = await downloadVideoFromStorage(admin, storagePath);
+    const geminiFile = await uploadDownloadedVideoToGemini(bytes, mimeType);
+    geminiFileName = geminiFile.name;
+    const transcript = await transcribeVideoSpeech(geminiFile.fileUri, mimeType);
     return NextResponse.json({ transcript });
   } catch (err) {
     console.error("[transcribe-video] transcription failed:", err);
+    const isStorageError = err instanceof VideoStorageError;
     return NextResponse.json(
       {
-        error: "Try Again",
-        ...(process.env.NODE_ENV !== "production"
+        error: isStorageError ? err.message : "Try Again",
+        ...(process.env.NODE_ENV !== "production" && !isStorageError
           ? { debug: { message: err instanceof Error ? err.message : String(err) } }
           : {}),
       },
-      { status: 502 }
+      { status: isStorageError ? 400 : 502 }
     );
+  } finally {
+    await cleanupVideoFile(admin, storagePath, geminiFileName, false);
   }
 }

@@ -4,6 +4,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { runImageDeepInvestigation } from "@/lib/image-analysis";
 import { normalizeClaim } from "@/lib/quick-check";
 
+// Route-level execution budget (Sept 2026 fix — see app/api/deep/route.ts's
+// comment for the full rationale). 60 is Hobby's max; without it Vercel's
+// silent 10s default kill can cut off runImageDeepInvestigation before it
+// returns.
+export const maxDuration = 60;
+
 // Photo-as-claim Deep Investigation — mirrors app/api/verify-image/route.ts
 // as closely as possible (see that file's header for the full rationale on
 // why this is a separate route, the credit pattern, no caching, and media

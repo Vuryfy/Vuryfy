@@ -2,6 +2,13 @@ import { NextResponse } from "next/server";
 import { createClient as createServerSupabase } from "@/lib/supabase/server";
 import { transcribeAudio } from "@/lib/audio-transcript";
 
+// Route-level execution budget (Sept 2026 fix — see app/api/deep/route.ts's
+// comment, and app/api/transcribe-video/route.ts's original discovery of
+// this gap, for the full rationale). 60 is Hobby's max; without it
+// Vercel's silent 10s default kill can cut off the transcription call
+// before it returns.
+export const maxDuration = 60;
+
 // Free preview step for audio input's transcript sub-path — see
 // lib/audio-transcript.ts's file header for why this is free despite being
 // a real AI call (unlike QR decode / image OCR, which are free because

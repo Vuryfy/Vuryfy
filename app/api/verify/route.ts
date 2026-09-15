@@ -6,6 +6,16 @@ import { computeCacheKey, getCachedVerification, writeCache, type CachedVerifica
 import { detectPaymentReceipt } from "@/lib/detect-payment-receipt";
 import { detectPaymentRequest } from "@/lib/detect-payment-request";
 
+// Route-level execution budget (Sept 2026 fix, added across every AI-
+// calling route after the video-upload 413 investigation surfaced that
+// NONE of them declared this — see lib/prepare-video-upload.ts and app/
+// api/transcribe-video/route.ts for the original discovery). Without this,
+// Vercel kills the function at its Hobby-plan default of 10 seconds, which
+// Quick Check's search-and-synthesize pipeline can exceed under real-world
+// latency variance. A killed function returns no JSON body, so the
+// browser just hangs with no feedback. 60 is Hobby's max.
+export const maxDuration = 60;
+
 // Quick Check — Sprint 1 scope: text + link input only (per the locked
 // build order — QR/image/audio/video come one at a time after this).
 //

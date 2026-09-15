@@ -4,6 +4,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { runImageQuickCheck } from "@/lib/image-analysis";
 import { normalizeClaim } from "@/lib/quick-check";
 
+// Route-level execution budget (Sept 2026 fix — see app/api/deep/route.ts's
+// comment for the full rationale). 60 is Hobby's max; without it Vercel's
+// silent 10s default kill can cut off runImageQuickCheck before it
+// returns.
+export const maxDuration = 60;
+
 // Photo-as-claim Quick Check — a separate route from /api/verify rather
 // than a special case bolted onto it, because the request/response shape
 // genuinely differs: this one carries base64 image data instead of a plain

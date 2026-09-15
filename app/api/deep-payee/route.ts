@@ -5,6 +5,12 @@ import { runDeepInvestigation, DEEP_ENGINE_VERSION, type DeepInvestigationResult
 import { normalizeClaim } from "@/lib/quick-check";
 import { computeCacheKey, getCachedVerification, writeCache, type CachedVerification } from "@/lib/verification-cache";
 
+// Route-level execution budget (Sept 2026 fix — see app/api/deep/route.ts's
+// comment for the full rationale). 60 is Hobby's max; without it Vercel's
+// silent 10s default kill can cut off runDeepInvestigation's multi-step
+// search before it returns.
+export const maxDuration = 60;
+
 // Payee reputation Deep Investigation — mirrors app/api/verify-payee/
 // route.ts exactly (see that file's header for the full rationale: why
 // this exists, what it can and can't actually answer, and why the

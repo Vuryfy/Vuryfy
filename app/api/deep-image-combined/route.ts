@@ -7,6 +7,12 @@ import { runImageDeepInvestigation, type ImageAnalysisResult } from "@/lib/image
 import { computeCacheKey, getCachedVerification, writeCache, type CachedVerification } from "@/lib/verification-cache";
 import { detectPaymentReceipt } from "@/lib/detect-payment-receipt";
 
+// Route-level execution budget (Sept 2026 fix — see app/api/deep/route.ts's
+// comment for the full rationale). This route runs two AI pipelines in
+// parallel (OCR text + photo), so it's exposed to Vercel's silent 10s
+// default kill even more than most. 60 is Hobby's max.
+export const maxDuration = 60;
+
 // Combined image Deep Investigation — mirrors app/api/verify-image-
 // combined/route.ts exactly (see that file's header for the full
 // rationale: the duplicate-buttons fix, the explicit 1-credit-total
