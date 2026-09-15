@@ -58,7 +58,13 @@ const EXTENSION_FOR_MIME_TYPE: Record<string, string> = {
 // Strips the video track and downmixes to 16kHz mono WAV — Deepgram only
 // needs the audio, and a smaller, simpler file uploads and transcribes
 // faster than sending full-quality stereo audio would.
-async function extractAudioToWav(videoBytes: Buffer, mimeType: string): Promise<Buffer> {
+//
+// Takes an ArrayBuffer (not Buffer) to match lib/video-file-pipeline.ts's
+// downloadVideoFromStorage() return type exactly — it hands back the raw
+// bytes from Supabase's blob.arrayBuffer() call, unconverted, so every
+// caller (this one included) converts at its own boundary rather than that
+// shared function assuming which downstream shape each caller wants.
+async function extractAudioToWav(videoBytes: ArrayBuffer, mimeType: string): Promise<Buffer> {
   if (!ffmpegPath) {
     throw new DeepgramTranscriptionError("ffmpeg binary is not available in this environment");
   }
@@ -68,7 +74,7 @@ async function extractAudioToWav(videoBytes: Buffer, mimeType: string): Promise<
   const inPath = path.join(os.tmpdir(), `${id}-in.${ext}`);
   const outPath = path.join(os.tmpdir(), `${id}-out.wav`);
 
-  await writeFile(inPath, videoBytes);
+  await writeFile(inPath, Buffer.from(videoBytes));
 
   try {
     await new Promise<void>((resolve, reject) => {
@@ -113,7 +119,7 @@ async function extractAudioToWav(videoBytes: Buffer, mimeType: string): Promise<
 // Real-world Hinglish accuracy varies a lot by vendor/model per published
 // benchmarks, so this is explicitly a pilot: compare its output against
 // what Gemini was producing before deciding this replaces it for good.
-export async function transcribeVideoSpeechViaDeepgram(videoBytes: Buffer, mimeType: string): Promise<string> {
+export async function transcribeVideoSpeechViaDeepgram(videoBytes: ArrayBuffer, mimeType: string): Promise<string> {
   const apiKey = process.env.DEEPGRAM_API_KEY;
   if (!apiKey) {
     throw new DeepgramTranscriptionError("DEEPGRAM_API_KEY is not set");
