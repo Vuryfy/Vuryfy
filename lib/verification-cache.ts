@@ -26,6 +26,11 @@ import type { QuickCheckEvidence } from "@/lib/quick-check";
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 
+// Shared TTL for audio caching (see writeCache's explicitFreshness note
+// above) — "medium" tier, same 14-day window classifyFreshness() already
+// uses as its default for non-time-sensitive text claims.
+export const AUDIO_CACHE_FRESHNESS: FreshnessResult = { freshnessClass: "medium", ttlMs: 14 * DAY_MS };
+
 export type FreshnessClass = "very_short" | "short" | "medium";
 
 export interface FreshnessResult {
@@ -128,13 +133,26 @@ export async function getCachedVerification(
 // primary key). Non-fatal on failure — same pattern as the other
 // secondary/audit writes in route.ts: log and move on, never fail the
 // user's actual request over a caching write.
+//
+// explicitFreshness (added Sept 15, 2026 for audio caching — see
+// app/api/verify-audio/route.ts and friends): classifyFreshness()'s
+// keyword regexes are written for TEXT CLAIMS ("current", "as of today",
+// a recent year) and mean nothing run against a raw audio/base64 blob.
+// Audio content doesn't go stale the way a claim about current events
+// does — an authenticity verdict on a specific recording is a fixed
+// property of that file, if anything arguably safe to cache even longer
+// than "medium" — so audio callers pass an explicit freshness instead of
+// letting classifyFreshness misread binary data. Text callers (Quick
+// Check, Deep Investigation) are unaffected — they still omit this and
+// get the keyword-based classification as before.
 export async function writeCache(
   admin: SupabaseClient,
   cacheKey: string,
   verificationId: string,
-  claim: string
+  claim: string,
+  explicitFreshness?: FreshnessResult
 ): Promise<void> {
-  const { freshnessClass, ttlMs } = classifyFreshness(claim);
+  const { freshnessClass, ttlMs } = explicitFreshness ?? classifyFreshness(claim);
   const expiresAt = new Date(Date.now() + ttlMs).toISOString();
 
   const { error } = await admin.from("verification_cache_exact").upsert(

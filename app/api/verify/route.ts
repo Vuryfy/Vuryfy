@@ -3,6 +3,7 @@ import { createClient as createServerSupabase } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { runQuickCheck, normalizeClaim, ENGINE_VERSION, type QuickCheckResult } from "@/lib/quick-check";
 import { computeCacheKey, getCachedVerification, writeCache, type CachedVerification } from "@/lib/verification-cache";
+import { detectPaymentReceipt } from "@/lib/detect-payment-receipt";
 
 // Quick Check — Sprint 1 scope: text + link input only (per the locked
 // build order — QR/image/audio/video come one at a time after this).
@@ -20,6 +21,19 @@ import { computeCacheKey, getCachedVerification, writeCache, type CachedVerifica
 // If the pipeline throws (genuine infra failure), the reservation is given
 // back via refund_quick_check() (see supabase/migrations/0002_quick_check_
 // refund.sql) and no verification row is written.
+//
+// Payment-receipt carve-out (Sept 15, 2026, see lib/detect-payment-
+// receipt.ts for the full rationale): before any of that credit/cache
+// machinery runs, the claim is checked for the shape of a private payment
+// receipt (a UPI/bank transfer confirmation). Neither Quick Check nor Deep
+// Investigation has any way to confirm a private transaction actually
+// happened, so running one through the pipeline below produces a
+// misleading low-confidence "Unverified" for real and fake receipts alike
+// — this mirrors the payment-QR carve-out in lib/detect-payment-link.ts
+// exactly, just triggered from text instead of a decoded QR. A detected
+// receipt short-circuits here: no AI call, no search, no verdict, no
+// credit charged, no verifications row written — just the extracted
+// fields and an honest explanation returned directly.
 //
 // Exact-match caching (Part 11, added Sept 14, 2026): after the credit is
 // reserved, we check verification_cache_exact for a live (non-expired)
@@ -55,7 +69,13 @@ export async function POST(request: Request) {
   if (claim.length < 5) {
     return NextResponse.json({ error: "Claim is too short." }, { status: 400 });
   }
-  if (inputType !== "text" && inputType !== "link" && inputType !== "qr" && inputType !== "ocr") {
+  if (
+    inputType !== "text" &&
+    inputType !== "link" &&
+    inputType !== "qr" &&
+    inputType !== "ocr" &&
+    inputType !== "audio_transcript"
+  ) {
     return NextResponse.json(
       { error: `Input type "${inputType}" isn't supported yet.` },
       { status: 400 }
@@ -63,6 +83,29 @@ export async function POST(request: Request) {
   }
 
   const admin = createAdminClient();
+
+  const receipt = detectPaymentReceipt(claim);
+  if (receipt) {
+    const { data: balance } = await admin
+      .from("credit_balances")
+      .select("quick_checks_remaining, deep_investigations_remaining")
+      .eq("user_id", user.id)
+      .single();
+
+    return NextResponse.json({
+      id: null,
+      mode: "quick",
+      type: "payment_receipt",
+      claim,
+      receipt,
+      credits: {
+        quick_checks: balance?.quick_checks_remaining ?? 0,
+        deep_investigations: balance?.deep_investigations_remaining ?? 0,
+        total: (balance?.quick_checks_remaining ?? 0) + (balance?.deep_investigations_remaining ?? 0),
+      },
+    });
+  }
+
   const normalizedClaim = normalizeClaim(claim);
   const cacheKey = computeCacheKey(normalizedClaim, inputType, ENGINE_VERSION);
 

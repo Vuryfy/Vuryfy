@@ -1,0 +1,192 @@
+import { NextResponse } from "next/server";
+import { createClient as createServerSupabase } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { runQuickCheck, normalizeClaim, ENGINE_VERSION, type QuickCheckResult } from "@/lib/quick-check";
+import { computeCacheKey, getCachedVerification, writeCache, type CachedVerification } from "@/lib/verification-cache";
+
+// Payee reputation Quick Check — Sept 15, 2026, added from the payment-QR
+// card (app/verify/qr/page.tsx) after a user asked "what if I want Deep
+// Investigation on this?" for a payment QR.
+//
+// This is deliberately a DIFFERENT question from what the payment-QR
+// carve-out (lib/detect-payment-link.ts) and the payment-receipt carve-out
+// (lib/detect-payment-receipt.ts) both correctly refuse to answer. Neither
+// pipeline can confirm who controls a specific UPI ID or whether a private
+// transaction happened — that's still true here, and this route doesn't
+// try. What IS a genuinely searchable, evidence-groundable question: does
+// this payee NAME or UPI ID have any public reputation — scam reports,
+// fraud complaints, a legitimate business footprint — the same kind of
+// question the ordinary text pipeline already answers for any other claim.
+//
+// This reuses lib/quick-check.ts entirely unchanged, just with a
+// constructed claim rather than a user-typed one, framed so the existing
+// "Scam" verdict (see quick-check.ts's header) does exactly the right
+// thing: it only fires when retrieved evidence specifically names THIS
+// payee/UPI ID as a scam, never from vibes. The much more common case —
+// zero search results, since most small businesses and most scammers
+// alike have little to no web footprint — correctly falls back to
+// "Unverified" (quick-check.ts's built-in zero-evidence path), which is
+// exactly right here too: no news is not good news. A caveat saying so is
+// attached to every result below, in code, so it survives regardless of
+// how the model happens to phrase its summary.
+//
+// Credit/cache pattern: identical to /api/verify — a real search + AI call
+// happened, so it costs a Quick Check credit like any other claim, and
+// gets the same exact-match caching (a repeat investigation of the same
+// payee within the cache TTL doesn't re-run the search).
+const DISCLAIMER =
+  "This searches the public web for reports about this payee — it can't confirm who actually controls the payment ID, and finding nothing doesn't mean they're legitimate. Most real businesses and most scammers alike often have little to no searchable footprint.";
+
+function buildPayeeClaim(payeeName: string, upiId: string): string {
+  if (payeeName) {
+    return `"${payeeName}" (UPI ID: ${upiId}) is a legitimate business or individual, with no public reports identifying them in a scam, fraud, or non-payment scheme.`;
+  }
+  return `The UPI ID "${upiId}" is legitimate, with no public reports identifying it in a scam, fraud, or non-payment scheme.`;
+}
+
+export async function POST(request: Request) {
+  const supabase = await createServerSupabase();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return NextResponse.json({ error: "Not signed in." }, { status: 401 });
+  }
+
+  const body = await request.json().catch(() => null);
+  const payeeName: string = (body?.payee_name ?? "").trim().slice(0, 200);
+  const upiId: string = (body?.upi_id ?? "").trim().slice(0, 200);
+
+  if (!upiId) {
+    return NextResponse.json({ error: "No payee ID was provided." }, { status: 400 });
+  }
+
+  const admin = createAdminClient();
+  const searchClaim = buildPayeeClaim(payeeName, upiId);
+  const normalizedClaim = normalizeClaim(searchClaim);
+  const cacheKey = computeCacheKey(normalizedClaim, "payee_reputation", ENGINE_VERSION);
+  const displayClaim = payeeName ? `${payeeName} — ${upiId}` : upiId;
+
+  const { data: remaining, error: rpcError } = await admin.rpc("decrement_quick_check", {
+    p_user_id: user.id,
+  });
+
+  if (rpcError) {
+    console.error("[verify-payee] decrement_quick_check RPC failed:", rpcError);
+    return NextResponse.json(
+      { error: "Could not check your credit balance. Please try again." },
+      { status: 500 }
+    );
+  }
+  if (remaining === null || remaining === undefined) {
+    return NextResponse.json(
+      { error: "You're out of Quick Check credits. Upgrade your plan to continue." },
+      { status: 402 }
+    );
+  }
+
+  const cached = await getCachedVerification(admin, cacheKey);
+  const cacheHit = cached !== null;
+
+  let result: QuickCheckResult | CachedVerification;
+  if (cached) {
+    result = cached;
+  } else {
+    try {
+      result = await runQuickCheck(searchClaim);
+    } catch (err) {
+      console.error("[verify-payee] pipeline failed (refunding credit):", err);
+
+      const { error: refundError } = await admin.rpc("refund_quick_check", { p_user_id: user.id });
+      if (refundError) {
+        console.error("[verify-payee] refund_quick_check RPC ALSO failed:", refundError);
+      }
+
+      await admin.from("credit_transactions").insert([
+        { user_id: user.id, credit_type: "quick_check", amount: -1, reason: "quick_check_reserved" },
+        { user_id: user.id, credit_type: "quick_check", amount: 1, reason: "quick_check_refunded_infra_error" },
+      ]);
+
+      return NextResponse.json(
+        {
+          error: "Try Again",
+          ...(process.env.NODE_ENV !== "production"
+            ? { debug: { message: err instanceof Error ? err.message : String(err) } }
+            : {}),
+        },
+        { status: 502 }
+      );
+    }
+  }
+
+  const caveats = [DISCLAIMER];
+
+  const { data: verification, error: insertError } = await admin
+    .from("verifications")
+    .insert({
+      user_id: user.id,
+      mode: "quick",
+      input_type: "payee_reputation",
+      claim_text: displayClaim,
+      normalized_claim: normalizeClaim(displayClaim),
+      verdict: result.verdict,
+      confidence: result.confidence,
+      summary: result.summary,
+      key_evidence: result.key_evidence,
+      sources: result.sources,
+      caveats,
+      engine_version: result.engine_version,
+      credit_charged: true,
+    })
+    .select()
+    .single();
+
+  if (insertError || !verification) {
+    console.error("[verify-payee] verifications insert failed:", insertError);
+    return NextResponse.json(
+      { error: "Verification ran but couldn't be saved. Please try again." },
+      { status: 500 }
+    );
+  }
+
+  if (!cacheHit) {
+    await writeCache(admin, cacheKey, verification.id, searchClaim);
+  }
+
+  const { error: txnError } = await admin.from("credit_transactions").insert({
+    user_id: user.id,
+    credit_type: "quick_check",
+    amount: -1,
+    reason: cacheHit ? "quick_check_completed_payee_cache_hit" : "quick_check_completed_payee",
+    verification_id: verification.id,
+  });
+  if (txnError) {
+    console.error("[verify-payee] credit_transactions insert failed:", txnError);
+  }
+
+  const { data: balance } = await admin
+    .from("credit_balances")
+    .select("quick_checks_remaining, deep_investigations_remaining")
+    .eq("user_id", user.id)
+    .single();
+
+  return NextResponse.json({
+    id: verification.id,
+    mode: "quick",
+    claim: verification.claim_text,
+    verdict: verification.verdict,
+    confidence: verification.confidence,
+    explanation: verification.summary,
+    evidence: verification.key_evidence,
+    sources: verification.sources,
+    caveats: verification.caveats,
+    cached: cacheHit,
+    cached_at: cacheHit ? (result as CachedVerification).cached_at : null,
+    credits: {
+      quick_checks: balance?.quick_checks_remaining ?? 0,
+      deep_investigations: balance?.deep_investigations_remaining ?? 0,
+      total: (balance?.quick_checks_remaining ?? 0) + (balance?.deep_investigations_remaining ?? 0),
+    },
+  });
+}
