@@ -49,6 +49,17 @@ import { normalizeClaim, type QuickCheckEvidence } from "@/lib/quick-check";
 // on this string (see verification-cache.ts).
 export const DEEP_ENGINE_VERSION = "v2-gemini-tavily-deep";
 
+// Sept 15, 2026: added same day as the engine_version bump above, after a
+// live 503 on this exact call surfaced a gap — modelForTier's "reasoning"
+// tier moved every Deep Investigation pipeline onto gemini-3.8-flash, but
+// the fallback-model safety net (see ai-gateway.ts's StructuredCallParams
+// header) had only ever been wired into video Deep Investigation, the one
+// call with a documented history of 503s. Text Deep Investigation shares
+// the same underlying model now and was just as exposed, with only the
+// bare 2-retry default and no fallback — this closes that gap. Same
+// fallback chain as video-analysis.ts's VIDEO_DEEP_FALLBACK_MODELS.
+const SYNTHESIS_FALLBACK_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"];
+
 export interface DeepInvestigationResult {
   verdict: string;
   confidence: number;
@@ -203,6 +214,7 @@ export async function runDeepInvestigation(claimRaw: string): Promise<DeepInvest
     systemPrompt: SYNTHESIS_SYSTEM_PROMPT,
     userPrompt,
     responseSchema: SYNTHESIS_SCHEMA,
+    fallbackModels: SYNTHESIS_FALLBACK_MODELS,
   });
 
   // Code-enforced grounding (Part 19): only trust cited ids that actually
