@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { runDeepInvestigation, DEEP_ENGINE_VERSION, type DeepInvestigationResult } from "@/lib/deep-investigation";
 import { normalizeClaim } from "@/lib/quick-check";
 import { computeCacheKey, getCachedVerification, writeCache, type CachedVerification } from "@/lib/verification-cache";
+import { detectPaymentReceipt } from "@/lib/detect-payment-receipt";
 
 // Deep Investigation (Part 11 routing logic + Part 26.5) — a heavier,
 // multi-angle version of Quick Check: the claim is decomposed into a
@@ -13,6 +14,13 @@ import { computeCacheKey, getCachedVerification, writeCache, type CachedVerifica
 // lib/deep-investigation.ts for the pipeline itself and the architecture
 // note on why this is a single synchronous request rather than a
 // background job).
+//
+// Payment-receipt carve-out (Sept 15, 2026, see lib/detect-payment-
+// receipt.ts for the full rationale): mirrors the same carve-out added to
+// app/api/verify/route.ts — a claim shaped like a private payment receipt
+// short-circuits before any credit/cache machinery runs, since neither
+// pipeline can confirm a private transaction actually happened. No AI
+// call, no verdict, no credit charged.
 //
 // Everything else below deliberately mirrors app/api/verify/route.ts as
 // closely as possible — same credit reserve/refund-on-infra-failure
@@ -45,7 +53,13 @@ export async function POST(request: Request) {
   if (claim.length > 10000) {
     return NextResponse.json({ error: "Claim is too long (10,000 character limit)." }, { status: 400 });
   }
-  if (inputType !== "text" && inputType !== "link" && inputType !== "qr" && inputType !== "ocr") {
+  if (
+    inputType !== "text" &&
+    inputType !== "link" &&
+    inputType !== "qr" &&
+    inputType !== "ocr" &&
+    inputType !== "audio_transcript"
+  ) {
     return NextResponse.json(
       { error: `Input type "${inputType}" isn't supported yet.` },
       { status: 400 }
@@ -53,6 +67,29 @@ export async function POST(request: Request) {
   }
 
   const admin = createAdminClient();
+
+  const receipt = detectPaymentReceipt(claim);
+  if (receipt) {
+    const { data: balance } = await admin
+      .from("credit_balances")
+      .select("quick_checks_remaining, deep_investigations_remaining")
+      .eq("user_id", user.id)
+      .single();
+
+    return NextResponse.json({
+      id: null,
+      mode: "deep",
+      type: "payment_receipt",
+      claim,
+      receipt,
+      credits: {
+        quick_checks: balance?.quick_checks_remaining ?? 0,
+        deep_investigations: balance?.deep_investigations_remaining ?? 0,
+        total: (balance?.quick_checks_remaining ?? 0) + (balance?.deep_investigations_remaining ?? 0),
+      },
+    });
+  }
+
   const normalizedClaim = normalizeClaim(claim);
   const cacheKey = computeCacheKey(normalizedClaim, inputType, DEEP_ENGINE_VERSION);
 

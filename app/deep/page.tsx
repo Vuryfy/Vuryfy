@@ -87,6 +87,9 @@ export default function DeepPage() {
         <p className="hint">
           Got a photo? <Link href="/verify/image">Check it</Link>
         </p>
+        <p className="hint">
+          Got audio? <Link href="/verify/audio">Check it</Link>
+        </p>
       </section>
     </main>
   );

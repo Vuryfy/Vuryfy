@@ -31,6 +31,15 @@
 // text-only requests. Also accepts an optional timeoutMs override, since a
 // vision call over a real photo can reasonably take a little longer than a
 // short text-evaluation call — still bounded, never unbounded.
+//
+// Audio input (added for audio Quick Check/Deep Investigation, Sept 2026):
+// same mechanism, same inlineData part shape — Gemini accepts inline audio
+// data (mp3/wav/ogg/m4a/webm/etc.) exactly like inline image data, so this
+// needed a second optional array (audioParts) rather than a new endpoint or
+// call shape. Used by lib/audio-transcript.ts (transcription) and
+// lib/audio-analysis.ts (authenticity analysis); every other caller is
+// unaffected. imageParts and audioParts can in principle both be set on one
+// call, though no current caller does that.
 
 const GEMINI_MODEL = "gemini-3.1-flash-lite";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -42,6 +51,13 @@ export interface ImagePart {
   data: string; // base64, no "data:...;base64," prefix
 }
 
+// Same shape as ImagePart — Gemini's inlineData part doesn't distinguish by
+// type beyond the mimeType field itself. Kept as a separate named type
+// rather than reusing ImagePart directly so call sites read clearly (an
+// audioParts array of ImagePart would be a confusing thing to read at the
+// call site even though the runtime shape is identical).
+export type AudioPart = ImagePart;
+
 export interface StructuredCallParams {
   tier: ModelTier;
   systemPrompt: string;
@@ -49,6 +65,7 @@ export interface StructuredCallParams {
   responseSchema: Record<string, unknown>;
   temperature?: number;
   imageParts?: ImagePart[];
+  audioParts?: AudioPart[];
   timeoutMs?: number;
 }
 
@@ -98,12 +115,13 @@ function modelForTier(_tier: ModelTier): string {
 async function attemptCall<T>(params: StructuredCallParams, apiKey: string): Promise<StructuredCallResult<T>> {
   void modelForTier(params.tier); // reserved for when tiers diverge onto different models
 
-  // Image parts, when present, go first in the parts array (Gemini's own
-  // examples do this consistently) followed by the text prompt — this is a
-  // convention, not a hard requirement, but keeping it consistent avoids a
-  // class of "does part order matter" debugging later.
+  // Image/audio parts, when present, go first in the parts array (Gemini's
+  // own examples do this consistently) followed by the text prompt — this
+  // is a convention, not a hard requirement, but keeping it consistent
+  // avoids a class of "does part order matter" debugging later.
   const parts: Record<string, unknown>[] = [
     ...(params.imageParts ?? []).map((p) => ({ inlineData: { mimeType: p.mimeType, data: p.data } })),
+    ...(params.audioParts ?? []).map((p) => ({ inlineData: { mimeType: p.mimeType, data: p.data } })),
     { text: params.userPrompt },
   ];
 

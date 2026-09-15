@@ -89,6 +89,9 @@ export default function Home() {
           <Link className="secondary-link" href="/verify/image">
             Check a Photo
           </Link>
+          <Link className="secondary-link" href="/verify/audio">
+            Check Audio
+          </Link>
         </div>
         <div className="balance-card">
           <div>
