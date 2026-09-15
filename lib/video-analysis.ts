@@ -69,7 +69,17 @@ import type { QuickCheckEvidence } from "@/lib/quick-check";
 // Not integrated by this file directly, same separation as audio-analysis.ts.
 
 export const VIDEO_QUICK_ENGINE_VERSION = "v1-gemini-video-quick";
-export const VIDEO_DEEP_ENGINE_VERSION = "v1-gemini-video-deep";
+// Sept 15, 2026: bumped v1 -> v2. Not a prompt/schema change — the
+// underlying model behind "reasoning" tier changed (ai-gateway.ts's
+// modelForTier, gemini-3.1-flash-lite -> gemini-3.8-flash). Cache entries
+// are keyed on engine_version (see verification-cache.ts), so leaving this
+// string unchanged would have kept serving pre-fix verdicts computed by
+// the old shared model out of cache indefinitely — confirmed via Vercel
+// logs that this exact thing happened (a live Quick Check/Deep
+// Investigation test both hit cache and never called callStructured at
+// all, which is why they still read near-identical after the model split
+// shipped). Bump this again any time modelForTier's mapping changes.
+export const VIDEO_DEEP_ENGINE_VERSION = "v2-gemini-video-deep";
 
 export interface VideoAnalysisResult {
   verdict: string;

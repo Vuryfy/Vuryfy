@@ -41,7 +41,13 @@ import { normalizeClaim, type QuickCheckEvidence } from "@/lib/quick-check";
 // getting a confident "Scam" from generic "how PayPal phishing works"
 // evidence alone, with nothing about that specific domain.
 
-export const DEEP_ENGINE_VERSION = "v1-gemini-tavily-deep";
+// Sept 15, 2026: bumped v1 -> v2 — same reasoning as video-analysis.ts's
+// identical bump on VIDEO_DEEP_ENGINE_VERSION this same day: the model
+// behind "reasoning" tier changed (ai-gateway.ts's modelForTier), and
+// leaving this unchanged would keep serving pre-change cached verdicts
+// out of the exact-match cache indefinitely, since cache entries are keyed
+// on this string (see verification-cache.ts).
+export const DEEP_ENGINE_VERSION = "v2-gemini-tavily-deep";
 
 export interface DeepInvestigationResult {
   verdict: string;

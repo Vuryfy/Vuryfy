@@ -80,7 +80,13 @@ import type { QuickCheckEvidence } from "@/lib/quick-check";
 // meaningful duplicate-audio traffic.
 
 export const AUDIO_QUICK_ENGINE_VERSION = "v4-gemini-audio-quick-aigen";
-export const AUDIO_DEEP_ENGINE_VERSION = "v4-gemini-audio-deep-aigen";
+// Sept 15, 2026: bumped v4 -> v5 — same reasoning as video-analysis.ts's
+// identical bump on VIDEO_DEEP_ENGINE_VERSION this same day: the model
+// behind "reasoning" tier changed (ai-gateway.ts's modelForTier), and
+// leaving this unchanged would keep serving pre-change cached verdicts
+// out of the exact-match cache indefinitely, since cache entries are keyed
+// on this string (see verification-cache.ts).
+export const AUDIO_DEEP_ENGINE_VERSION = "v5-gemini-audio-deep-aigen";
 
 export interface AudioAnalysisResult {
   verdict: string;
