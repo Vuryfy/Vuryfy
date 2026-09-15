@@ -282,7 +282,14 @@ const VIDEO_DEEP_RETRY_DELAYS_MS = [1000, 3000, 6000, 10_000];
 // for the full reasoning (a real forum report that Vertex AI sees the same
 // 503s ruled out "switch to the enterprise endpoint" as a fix — a
 // different MODEL, on a separate serving pool, is the actual lever).
-const VIDEO_DEEP_FALLBACK_MODELS = ["gemini-3.5-flash-lite", "gemini-3.8-flash"];
+//
+// Sept 15, 2026 (same day): "reasoning" tier's primary model became
+// gemini-3.8-flash (see ai-gateway.ts's modelForTier) — dropped it from
+// this list since falling back to the same model that just failed defeats
+// the separate-serving-pool point. gemini-3.1-flash-lite (the "cheap"
+// tier's model) added as the second fallback so there are still two
+// genuinely distinct pools to fall back through.
+const VIDEO_DEEP_FALLBACK_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"];
 
 export async function runVideoDeepInvestigation(
   fileUri: string,

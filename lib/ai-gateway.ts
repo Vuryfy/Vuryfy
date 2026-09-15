@@ -80,6 +80,7 @@
 // File API.
 
 const GEMINI_MODEL = "gemini-3.1-flash-lite";
+const GEMINI_REASONING_MODEL = "gemini-3.8-flash";
 
 // Sept 15, 2026: was a fixed const built once from GEMINI_MODEL — now a
 // function, since callStructured() needs to hit a DIFFERENT model's
@@ -185,12 +186,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// One model wired for both tiers in V1 (see file header). Kept as a lookup
-// rather than using GEMINI_MODEL directly at call sites so that giving the
-// reasoning tier its own (likely larger/pricier) model later — for Deep
-// Investigation — is a one-line change here, not a refactor of callers.
-function modelForTier(_tier: ModelTier): string {
-  return GEMINI_MODEL;
+// Sept 15, 2026: was one model wired for both tiers in V1 (see file
+// header) — Quick Check and Deep Investigation were hitting the literal
+// same model, so a Deep Investigation's only real difference was a longer
+// timeout and one extra sentence in its prompt, not a deeper pass. Kept as
+// a lookup (rather than using GEMINI_MODEL directly at call sites) so this
+// stayed a one-line change once it was time to make it, as anticipated.
+// "reasoning" tier now gets a genuinely stronger model.
+function modelForTier(tier: ModelTier): string {
+  return tier === "reasoning" ? GEMINI_REASONING_MODEL : GEMINI_MODEL;
 }
 
 async function attemptCall<T>(params: StructuredCallParams, apiKey: string, model: string): Promise<StructuredCallResult<T>> {
