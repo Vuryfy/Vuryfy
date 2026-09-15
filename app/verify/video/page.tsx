@@ -3,50 +3,37 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
-import { prepareAudioForUpload, type PreparedAudio } from "@/lib/prepare-audio-upload";
+import { prepareVideoForUpload, type PreparedVideo } from "@/lib/prepare-video-upload";
 
-// Audio input — first half of the last step in the locked media-type build
-// order (text + link -> QR -> image -> audio/video), audio shipping ahead
-// of video per the user's explicit sequencing call (video is significantly
-// more complex — frame extraction, scene detection, per-frame OCR — so
-// audio ships and gets fully tested on its own first).
+// Video input — the last step in the locked media-type build order (text +
+// link -> QR -> image -> audio -> video), shipping after audio per the
+// user's explicit sequencing call. Mirrors app/verify/audio/page.tsx as
+// closely as possible, built combined from the start (see
+// app/api/verify-video-combined/route.ts's header) rather than repeating
+// audio's original "two buttons on one screen" mistake and fixing it
+// later.
 //
-// Originally shipped (Sept 14, 2026) with transcript fact-checking and
-// audio-authenticity analysis as two fully independent sub-paths, each
-// with its own Quick Check / Deep Investigation buttons — so a recording
-// with speech showed FOUR buttons on one screen, two labeled "Quick
-// Check". User feedback the same day: confusing, and not what was wanted.
-// Reworked so that whenever a transcript exists, there is exactly ONE
-// Quick Check button and ONE Deep Investigation button, each of which
-// combines both analyses (fact-checking what's said and listening to the
-// recording itself, via /api/verify-audio-combined or
-// /api/deep-audio-combined, which run both pipelines under a single,
-// explicitly-chosen 1-credit charge — see that route's header for the
-// credit-cost decision) and shows both verdicts on one result screen (see
-// app/result/page.tsx's `secondary` field). When no speech is found,
-// there's nothing to combine, so the original audio-only authenticity
-// check (its own single Quick Check / Deep Investigation pair, via
-// /api/verify-audio and /api/deep-audio) is used unchanged.
-//
-// Unlike image input, transcription itself requires a network call (no
-// free client-side speech-to-text exists — see prepare-audio-upload.ts),
-// so choosing a file triggers a brief "Transcribing…" step before the
-// transcript block appears. No credit is charged until a Quick Check or
-// Deep Investigation button is explicitly pressed — same no-surprise-cost
-// principle as every other confirm screen in this app.
-export default function VerifyAudioPage() {
+// Same free-preview-then-charge shape as audio: choosing a video triggers
+// a brief "Transcribing…" step (video's audio track, via
+// /api/transcribe-video) before the transcript block appears — no credit
+// charged until a Quick Check or Deep Investigation button is explicitly
+// pressed. When a transcript is found, ONE Quick Check button and ONE Deep
+// Investigation button run both the transcript fact-check and the video
+// authenticity/deepfake analysis together (1 credit total). When no speech
+// is found, only the video-only authenticity check is offered.
+export default function VerifyVideoPage() {
   const router = useRouter();
   const supabase = createClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [processing, setProcessing] = useState(false);
   const [processError, setProcessError] = useState("");
-  const [prepared, setPrepared] = useState<PreparedAudio | null>(null);
+  const [prepared, setPrepared] = useState<PreparedVideo | null>(null);
   const [transcript, setTranscript] = useState<string | null>(null);
   const [noSpeechFound, setNoSpeechFound] = useState(false);
   const [context, setContext] = useState("");
   const [submitting, setSubmitting] = useState<
-    "combined-quick" | "combined-deep" | "audio-quick" | "audio-deep" | null
+    "combined-quick" | "combined-deep" | "video-quick" | "video-deep" | null
   >(null);
   const [submitError, setSubmitError] = useState("");
 
@@ -63,13 +50,13 @@ export default function VerifyAudioPage() {
     setNoSpeechFound(false);
     setSubmitError("");
     try {
-      const audio = await prepareAudioForUpload(file);
-      setPrepared(audio);
+      const video = await prepareVideoForUpload(file);
+      setPrepared(video);
 
-      const r = await fetch("/api/transcribe-audio", {
+      const r = await fetch("/api/transcribe-video", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ audio_base64: audio.base64, mime_type: audio.mimeType }),
+        body: JSON.stringify({ video_base64: video.base64, mime_type: video.mimeType }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "Transcription failed");
@@ -79,26 +66,25 @@ export default function VerifyAudioPage() {
         setNoSpeechFound(true);
       }
     } catch (e: any) {
-      setProcessError(e.message || "Couldn't process that audio file. Try a different file.");
+      setProcessError(e.message || "Couldn't process that video file. Try a different file.");
     } finally {
       setProcessing(false);
     }
   }
 
-  // Combined check — runs both the transcript fact-check and the audio
-  // authenticity listen-through from one button, one credit charge (see
-  // this page's header comment and app/api/verify-audio-combined/route.ts).
+  // Combined check — runs both the transcript fact-check and the video
+  // authenticity/deepfake analysis from one button, one credit charge.
   async function submitCombined(mode: "quick" | "deep") {
     if (!transcript || !prepared) return;
     setSubmitting(mode === "quick" ? "combined-quick" : "combined-deep");
     setSubmitError("");
     try {
-      const endpoint = mode === "quick" ? "/api/verify-audio-combined" : "/api/deep-audio-combined";
+      const endpoint = mode === "quick" ? "/api/verify-video-combined" : "/api/deep-video-combined";
       const r = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          audio_base64: prepared.base64,
+          video_base64: prepared.base64,
           mime_type: prepared.mimeType,
           transcript,
           context: context.trim(),
@@ -106,7 +92,7 @@ export default function VerifyAudioPage() {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || (mode === "quick" ? "Check failed" : "Investigation failed"));
-      sessionStorage.setItem("vuryfy_result", JSON.stringify({ ...d, return_to: "/verify/audio" }));
+      sessionStorage.setItem("vuryfy_result", JSON.stringify({ ...d, return_to: "/verify/video" }));
       router.push(`/result?id=${d.id}`);
     } catch (e: any) {
       setSubmitError(e.message);
@@ -115,26 +101,26 @@ export default function VerifyAudioPage() {
     }
   }
 
-  // Audio-only check — used only when no speech was found, so there's
+  // Video-only check — used only when no speech was found, so there's
   // nothing to combine with.
-  async function submitAudio(mode: "quick" | "deep") {
+  async function submitVideo(mode: "quick" | "deep") {
     if (!prepared) return;
-    setSubmitting(mode === "quick" ? "audio-quick" : "audio-deep");
+    setSubmitting(mode === "quick" ? "video-quick" : "video-deep");
     setSubmitError("");
     try {
-      const endpoint = mode === "quick" ? "/api/verify-audio" : "/api/deep-audio";
+      const endpoint = mode === "quick" ? "/api/verify-video" : "/api/deep-video";
       const r = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          audio_base64: prepared.base64,
+          video_base64: prepared.base64,
           mime_type: prepared.mimeType,
           context: context.trim(),
         }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || (mode === "quick" ? "Analysis failed" : "Investigation failed"));
-      sessionStorage.setItem("vuryfy_result", JSON.stringify({ ...d, return_to: "/verify/audio" }));
+      sessionStorage.setItem("vuryfy_result", JSON.stringify({ ...d, return_to: "/verify/video" }));
       router.push(`/result?id=${d.id}`);
     } catch (e: any) {
       setSubmitError(e.message);
@@ -153,7 +139,7 @@ export default function VerifyAudioPage() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  const hasAudio = !!prepared;
+  const hasVideo = !!prepared;
   const anySubmitting = !!submitting;
 
   return (
@@ -165,43 +151,43 @@ export default function VerifyAudioPage() {
         <div className="credits">Credits</div>
       </nav>
       <section className="verify">
-        <p className="eyebrow">AUDIO</p>
-        <h1>Check a recording.</h1>
+        <p className="eyebrow">VIDEO</p>
+        <h1>Check a video.</h1>
         <p className="sub">
-          Upload an audio file. If we can make out speech, we&apos;ll transcribe it so you can check
-          what&apos;s said, and we&apos;ll also listen to the recording itself for signs of AI voice
-          synthesis or splicing — both from the same check.
+          Upload a short video clip (under ~15MB). If we can make out speech, we&apos;ll transcribe
+          it so you can check what&apos;s said, and we&apos;ll also watch the video itself for signs
+          of deepfakes, face-swaps, or AI-generated footage — both from the same check.
         </p>
 
-        {!hasAudio && (
+        {!hasVideo && (
           <>
             <input
               ref={fileInputRef}
-              id="audio-file"
+              id="video-file"
               type="file"
-              accept="audio/*"
+              accept="video/*"
               className="qr-file-input"
               onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (file) handleFile(file);
               }}
             />
-            <label htmlFor="audio-file" className="primary-link">
-              {processing ? "Processing…" : "Choose an audio file"}
+            <label htmlFor="video-file" className="primary-link">
+              {processing ? "Processing…" : "Choose a video"}
             </label>
             {processError && <p className="error">{processError}</p>}
             <p className="hint">
-              Got a photo instead? <Link href="/verify/image">Check it</Link>
+              Got audio instead? <Link href="/verify/audio">Check it</Link>
             </p>
             <p className="hint">
-              Got a video instead? <Link href="/verify/video">Check it</Link>
+              Got a photo? <Link href="/verify/image">Check it</Link>
             </p>
           </>
         )}
 
-        {hasAudio && processing && <p className="hint">Transcribing…</p>}
+        {hasVideo && processing && <p className="hint">Transcribing…</p>}
 
-        {hasAudio && !processing && transcript && (
+        {hasVideo && !processing && transcript && (
           <div className="qr-decoded">
             <span>TRANSCRIPT (EDIT IF NEEDED)</span>
             <textarea
@@ -211,12 +197,12 @@ export default function VerifyAudioPage() {
               maxLength={10000}
             />
             <p className="hint">
-              We&apos;ll also listen to the recording itself for signs of AI voice synthesis or
-              splicing.
+              We&apos;ll also watch the video itself for signs of deepfakes, face-swaps, or AI-generated
+              footage.
             </p>
             <p className="hint">
-              Quick Check gives a fast answer on both what&apos;s said and the recording itself.
-              Deep Investigation researches more thoroughly and takes longer.
+              Quick Check gives a fast answer on both what&apos;s said and the video itself. Deep
+              Investigation researches more thoroughly and takes longer.
             </p>
             <div className="result-actions">
               <button className="secondary" onClick={reset} disabled={anySubmitting}>
@@ -233,34 +219,34 @@ export default function VerifyAudioPage() {
           </div>
         )}
 
-        {hasAudio && !processing && noSpeechFound && (
+        {hasVideo && !processing && noSpeechFound && (
           <div className="qr-decoded">
             <span>NO SPEECH FOUND</span>
             <p>
-              We couldn&apos;t make out any spoken words in this recording — only the authenticity
-              check below is available for it.
+              We couldn&apos;t make out any spoken words in this video — only the authenticity check
+              below is available for it.
             </p>
             <p className="hint">
-              We&apos;ll listen for signs of AI voice synthesis or splicing — not a source-verified
-              fact-check, just a listen-through. Optionally tell us what this recording is supposed
-              to be, and we&apos;ll note whether that sounds consistent.
+              We&apos;ll watch for signs of deepfakes, face-swaps, or AI-generated footage — not a
+              source-verified fact-check, just a watch-through. Optionally tell us what this video is
+              supposed to show, and we&apos;ll note whether that sounds consistent.
             </p>
             <textarea
               className="context-textarea"
               value={context}
               onChange={(e) => setContext(e.target.value)}
-              placeholder="What is this recording supposed to be? (optional)"
+              placeholder="What is this video supposed to show? (optional)"
               maxLength={500}
             />
             <div className="result-actions">
               <button className="secondary" onClick={reset} disabled={anySubmitting}>
                 Choose another
               </button>
-              <button className="secondary" onClick={() => submitAudio("deep")} disabled={anySubmitting}>
-                {submitting === "audio-deep" ? "Investigating…" : "Deep Investigation"}
+              <button className="secondary" onClick={() => submitVideo("deep")} disabled={anySubmitting}>
+                {submitting === "video-deep" ? "Investigating…" : "Deep Investigation"}
               </button>
-              <button onClick={() => submitAudio("quick")} disabled={anySubmitting}>
-                {submitting === "audio-quick" ? "Checking…" : "Quick Check"}
+              <button onClick={() => submitVideo("quick")} disabled={anySubmitting}>
+                {submitting === "video-quick" ? "Checking…" : "Quick Check"}
               </button>
             </div>
             {submitError && <p className="error">{submitError}</p>}

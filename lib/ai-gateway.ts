@@ -40,6 +40,27 @@
 // lib/audio-analysis.ts (authenticity analysis); every other caller is
 // unaffected. imageParts and audioParts can in principle both be set on one
 // call, though no current caller does that.
+//
+// Video input (added for video Quick Check/Deep Investigation, Sept 2026 —
+// last step in the locked media-type build order): same mechanism again.
+// Gemini's generateContent accepts inline video data (mp4/webm/mov/etc.)
+// the identical way — it natively processes both the visual frames AND the
+// video's own audio track from one inlineData part, which is exactly why
+// lib/video-transcript.ts can transcribe speech straight from a video file
+// without any separate audio-extraction step. Kept as its own named
+// videoParts array (rather than reusing audioParts, even though the
+// runtime shape is identical) for the same call-site-clarity reason
+// audioParts was kept separate from imageParts. Used by
+// lib/video-transcript.ts (transcription) and lib/video-analysis.ts
+// (authenticity/deepfake analysis); every other caller is unaffected.
+//
+// Inline video has a real size/duration ceiling worth being explicit about:
+// this stays well under Gemini's inline-request payload limit by capping
+// client-side upload size (see lib/prepare-video-upload.ts) rather than
+// switching to Gemini's separate File API, which would add real complexity
+// (upload-then-reference across two calls, cleanup) for a V1 that's
+// deliberately scoped to short clips. Revisit only if real usage shows
+// people need to check longer videos than that cap allows.
 
 const GEMINI_MODEL = "gemini-3.1-flash-lite";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -58,6 +79,9 @@ export interface ImagePart {
 // call site even though the runtime shape is identical).
 export type AudioPart = ImagePart;
 
+// Same shape again, same reasoning — see AudioPart above.
+export type VideoPart = ImagePart;
+
 export interface StructuredCallParams {
   tier: ModelTier;
   systemPrompt: string;
@@ -66,6 +90,7 @@ export interface StructuredCallParams {
   temperature?: number;
   imageParts?: ImagePart[];
   audioParts?: AudioPart[];
+  videoParts?: VideoPart[];
   timeoutMs?: number;
 }
 
@@ -122,6 +147,7 @@ async function attemptCall<T>(params: StructuredCallParams, apiKey: string): Pro
   const parts: Record<string, unknown>[] = [
     ...(params.imageParts ?? []).map((p) => ({ inlineData: { mimeType: p.mimeType, data: p.data } })),
     ...(params.audioParts ?? []).map((p) => ({ inlineData: { mimeType: p.mimeType, data: p.data } })),
+    ...(params.videoParts ?? []).map((p) => ({ inlineData: { mimeType: p.mimeType, data: p.data } })),
     { text: params.userPrompt },
   ];
 

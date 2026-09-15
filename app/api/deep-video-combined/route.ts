@@ -1,0 +1,238 @@
+import { NextResponse } from "next/server";
+import { createClient as createServerSupabase } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { runDeepInvestigation, DEEP_ENGINE_VERSION, type DeepInvestigationResult } from "@/lib/deep-investigation";
+import { normalizeClaim } from "@/lib/quick-check";
+import { runVideoDeepInvestigation, VIDEO_DEEP_ENGINE_VERSION, type VideoAnalysisResult } from "@/lib/video-analysis";
+import {
+  computeCacheKey,
+  getCachedVerification,
+  writeCache,
+  AUDIO_CACHE_FRESHNESS,
+  type CachedVerification,
+} from "@/lib/verification-cache";
+
+// Combined video Deep Investigation — mirrors app/api/deep-audio-combined/
+// route.ts exactly, one level down (see app/api/verify-video-combined/
+// route.ts and the audio combined routes for the full rationale). Only
+// differences from the Quick Check version: the reasoning-tier pipelines
+// (runDeepInvestigation, runVideoDeepInvestigation) and their own engine
+// versions/cache namespaces, decrement_deep_investigation/
+// refund_deep_investigation, and including caveats on the transcript row
+// too (Deep Investigation's text pipeline produces caveats; Quick Check's
+// doesn't).
+const ALLOWED_MIME_TYPES = new Set([
+  "video/mp4",
+  "video/quicktime",
+  "video/webm",
+  "video/x-matroska",
+  "video/3gpp",
+  "video/x-msvideo",
+]);
+const MAX_BASE64_LENGTH = 20_000_000;
+
+export async function POST(request: Request) {
+  const supabase = await createServerSupabase();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return NextResponse.json({ error: "Not signed in." }, { status: 401 });
+  }
+
+  const body = await request.json().catch(() => null);
+  const videoBase64: string = body?.video_base64 ?? "";
+  const mimeType: string = body?.mime_type ?? "";
+  const transcript: string = (body?.transcript ?? "").trim();
+  const context: string = (body?.context ?? "").trim().slice(0, 500);
+
+  if (!videoBase64) {
+    return NextResponse.json({ error: "No video was provided." }, { status: 400 });
+  }
+  if (videoBase64.length > MAX_BASE64_LENGTH) {
+    return NextResponse.json({ error: "That video is too large. Try a shorter clip." }, { status: 400 });
+  }
+  if (!ALLOWED_MIME_TYPES.has(mimeType)) {
+    return NextResponse.json({ error: "Unsupported video type." }, { status: 400 });
+  }
+  if (transcript.length < 5) {
+    return NextResponse.json(
+      { error: "No usable transcript to combine — use the video-only check instead." },
+      { status: 400 }
+    );
+  }
+  if (transcript.length > 10000) {
+    return NextResponse.json({ error: "Transcript is too long (10,000 character limit)." }, { status: 400 });
+  }
+
+  const admin = createAdminClient();
+  const normalizedTranscript = normalizeClaim(transcript);
+  const textCacheKey = computeCacheKey(normalizedTranscript, "video_transcript", DEEP_ENGINE_VERSION);
+  const videoCacheKey = computeCacheKey(`${videoBase64}|ctx:${context}`, "video", VIDEO_DEEP_ENGINE_VERSION);
+
+  const { data: remaining, error: rpcError } = await admin.rpc("decrement_deep_investigation", {
+    p_user_id: user.id,
+  });
+
+  if (rpcError) {
+    console.error("[deep-video-combined] decrement_deep_investigation RPC failed:", rpcError);
+    return NextResponse.json(
+      { error: "Could not check your credit balance. Please try again." },
+      { status: 500 }
+    );
+  }
+  if (remaining === null || remaining === undefined) {
+    return NextResponse.json(
+      { error: "You're out of Deep Investigation credits. Upgrade your plan to continue." },
+      { status: 402 }
+    );
+  }
+
+  const [textCached, videoCached] = await Promise.all([
+    getCachedVerification(admin, textCacheKey),
+    getCachedVerification(admin, videoCacheKey),
+  ]);
+  const textCacheHit = textCached !== null;
+  const videoCacheHit = videoCached !== null;
+
+  let textResult: DeepInvestigationResult | CachedVerification;
+  let videoResult: VideoAnalysisResult | CachedVerification;
+  try {
+    const [freshText, freshVideo] = await Promise.all([
+      textCached ? Promise.resolve(null) : runDeepInvestigation(transcript),
+      videoCached ? Promise.resolve(null) : runVideoDeepInvestigation(videoBase64, mimeType, context || null),
+    ]);
+    textResult = textCached ?? (freshText as DeepInvestigationResult);
+    videoResult = videoCached ?? (freshVideo as VideoAnalysisResult);
+  } catch (err) {
+    console.error("[deep-video-combined] pipeline failed (refunding credit):", err);
+
+    const { error: refundError } = await admin.rpc("refund_deep_investigation", { p_user_id: user.id });
+    if (refundError) {
+      console.error("[deep-video-combined] refund_deep_investigation RPC ALSO failed:", refundError);
+    }
+
+    await admin.from("credit_transactions").insert([
+      { user_id: user.id, credit_type: "deep_investigation", amount: -1, reason: "deep_investigation_reserved" },
+      { user_id: user.id, credit_type: "deep_investigation", amount: 1, reason: "deep_investigation_refunded_infra_error" },
+    ]);
+
+    return NextResponse.json(
+      {
+        error: "Try Again",
+        ...(process.env.NODE_ENV !== "production"
+          ? { debug: { message: err instanceof Error ? err.message : String(err) } }
+          : {}),
+      },
+      { status: 502 }
+    );
+  }
+
+  const claimTextForVideo = context || "[Video submitted for authenticity analysis]";
+
+  const { data: transcriptRow, error: insertError1 } = await admin
+    .from("verifications")
+    .insert({
+      user_id: user.id,
+      mode: "deep",
+      input_type: "video_transcript",
+      claim_text: transcript,
+      normalized_claim: normalizedTranscript,
+      verdict: textResult.verdict,
+      confidence: textResult.confidence,
+      summary: textResult.summary,
+      key_evidence: textResult.key_evidence,
+      sources: textResult.sources,
+      caveats: textResult.caveats,
+      engine_version: textResult.engine_version,
+      credit_charged: true,
+    })
+    .select()
+    .single();
+
+  if (insertError1 || !transcriptRow) {
+    console.error("[deep-video-combined] transcript verifications insert failed:", insertError1);
+    return NextResponse.json(
+      { error: "Investigation ran but couldn't be saved. Please try again." },
+      { status: 500 }
+    );
+  }
+
+  const { data: videoRow, error: insertError2 } = await admin
+    .from("verifications")
+    .insert({
+      user_id: user.id,
+      mode: "deep",
+      input_type: "video",
+      claim_text: claimTextForVideo,
+      normalized_claim: normalizeClaim(claimTextForVideo),
+      verdict: videoResult.verdict,
+      confidence: videoResult.confidence,
+      summary: videoResult.summary,
+      key_evidence: videoResult.key_evidence,
+      sources: videoResult.sources,
+      caveats: videoResult.caveats,
+      engine_version: videoResult.engine_version,
+      credit_charged: false,
+    })
+    .select()
+    .single();
+
+  if (insertError2 || !videoRow) {
+    console.error("[deep-video-combined] video verifications insert failed:", insertError2);
+  }
+
+  if (!textCacheHit) {
+    await writeCache(admin, textCacheKey, transcriptRow.id, transcript);
+  }
+  if (!videoCacheHit && videoRow) {
+    await writeCache(admin, videoCacheKey, videoRow.id, "[video content]", AUDIO_CACHE_FRESHNESS);
+  }
+
+  const { error: txnError } = await admin.from("credit_transactions").insert({
+    user_id: user.id,
+    credit_type: "deep_investigation",
+    amount: -1,
+    reason: "deep_investigation_completed_combined_video",
+    verification_id: transcriptRow.id,
+  });
+  if (txnError) {
+    console.error("[deep-video-combined] credit_transactions insert failed:", txnError);
+  }
+
+  const { data: balance } = await admin
+    .from("credit_balances")
+    .select("quick_checks_remaining, deep_investigations_remaining")
+    .eq("user_id", user.id)
+    .single();
+
+  return NextResponse.json({
+    id: transcriptRow.id,
+    mode: "deep",
+    claim: transcriptRow.claim_text,
+    verdict: transcriptRow.verdict,
+    confidence: transcriptRow.confidence,
+    explanation: transcriptRow.summary,
+    evidence: transcriptRow.key_evidence,
+    sources: transcriptRow.sources,
+    caveats: transcriptRow.caveats,
+    cached: textCacheHit,
+    cached_at: textCacheHit ? (textCached as CachedVerification).cached_at : null,
+    secondary: videoRow
+      ? {
+          id: videoRow.id,
+          eyebrow: "THE VIDEO ITSELF",
+          verdict: videoRow.verdict,
+          confidence: videoRow.confidence,
+          explanation: videoRow.summary,
+          caveats: videoRow.caveats,
+        }
+      : null,
+    credits: {
+      quick_checks: balance?.quick_checks_remaining ?? 0,
+      deep_investigations: balance?.deep_investigations_remaining ?? 0,
+      total: (balance?.quick_checks_remaining ?? 0) + (balance?.deep_investigations_remaining ?? 0),
+    },
+  });
+}

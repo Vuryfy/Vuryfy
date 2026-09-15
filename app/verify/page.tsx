@@ -71,6 +71,9 @@ export default function VerifyPage() {
         <p className="hint">
           Got audio? <Link href="/verify/audio">Check it</Link>
         </p>
+        <p className="hint">
+          Got a video? <Link href="/verify/video">Check it</Link>
+        </p>
       </section>
     </main>
   );
