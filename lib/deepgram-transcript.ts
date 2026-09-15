@@ -1,10 +1,3 @@
-import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { readFile, unlink, writeFile } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import ffmpegPath from "ffmpeg-static";
-
 // Video transcription, take 2 (Sept 15, 2026) — moved off Gemini onto
 // Deepgram's dedicated speech-to-text API. Gemini's own transcription call
 // hit a *sustained* run of 503 "model overloaded" errors during real
@@ -26,14 +19,23 @@ import ffmpegPath from "ffmpeg-static";
 // path around costs nothing and makes reverting a one-line route change if
 // this pilot doesn't work out.
 //
-// Deepgram's own docs/guides extract audio from video before calling
-// /v1/listen rather than sending the video container directly — see
-// https://deepgram.com/learn/transcribe-videos-nodejs. ffmpeg-static
-// bundles a static ffmpeg binary that works in Vercel's Node.js serverless
-// runtime; see next.config.ts's outputFileTracingIncludes for the config
-// needed so that binary actually ships with the deployed function (Next's
-// file tracing doesn't pick it up automatically — a real, easy-to-miss
-// gotcha with this package on Vercel).
+// Sept 15, 2026, revision 2 (same day): the first version of this file
+// extracted audio via ffmpeg-static + child_process before uploading, on
+// the assumption Deepgram needed a plain audio file (their own blog guide
+// does exactly that: https://deepgram.com/learn/transcribe-videos-nodejs).
+// That hit a real wall in production: ffmpeg-static locates its binary via
+// a `path.join(__dirname, 'ffmpeg')` computed at import time, and Next.js's
+// serverless bundling rewrites __dirname for a bundled route to the
+// route's OWN output directory (.next/server/app/api/transcribe-video/)
+// rather than where the binary actually lives — so the spawn failed with
+// ENOENT in production despite building and type-checking cleanly.
+// Vercel's own guidance is to avoid shipping native binaries like ffmpeg
+// into serverless functions at all — real risk of blowing the function's
+// size limit even once the path problem is solved. Deepgram's own
+// supported-formats docs explicitly list MP4 and WebM (they decode the
+// audio track server-side, same as Gemini does), so this revision skips
+// ffmpeg entirely and uploads the video file as-is with its real
+// Content-Type. Simpler, no native binary, no bundling footgun.
 
 export class DeepgramTranscriptionError extends Error {
   cause?: unknown;
@@ -45,72 +47,6 @@ export class DeepgramTranscriptionError extends Error {
 }
 
 const DEEPGRAM_ENDPOINT = "https://api.deepgram.com/v1/listen";
-
-const EXTENSION_FOR_MIME_TYPE: Record<string, string> = {
-  "video/mp4": "mp4",
-  "video/quicktime": "mov",
-  "video/webm": "webm",
-  "video/x-matroska": "mkv",
-  "video/3gpp": "3gp",
-  "video/x-msvideo": "avi",
-};
-
-// Strips the video track and downmixes to 16kHz mono WAV — Deepgram only
-// needs the audio, and a smaller, simpler file uploads and transcribes
-// faster than sending full-quality stereo audio would.
-//
-// Takes an ArrayBuffer (not Buffer) to match lib/video-file-pipeline.ts's
-// downloadVideoFromStorage() return type exactly — it hands back the raw
-// bytes from Supabase's blob.arrayBuffer() call, unconverted, so every
-// caller (this one included) converts at its own boundary rather than that
-// shared function assuming which downstream shape each caller wants.
-async function extractAudioToWav(videoBytes: ArrayBuffer, mimeType: string): Promise<Buffer> {
-  if (!ffmpegPath) {
-    throw new DeepgramTranscriptionError("ffmpeg binary is not available in this environment");
-  }
-
-  const ext = EXTENSION_FOR_MIME_TYPE[mimeType] ?? "mp4";
-  const id = randomUUID();
-  const inPath = path.join(os.tmpdir(), `${id}-in.${ext}`);
-  const outPath = path.join(os.tmpdir(), `${id}-out.wav`);
-
-  await writeFile(inPath, Buffer.from(videoBytes));
-
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const proc = spawn(ffmpegPath as string, [
-        "-hide_banner",
-        "-y",
-        "-i",
-        inPath,
-        "-vn", // drop the video stream — audio only
-        "-ac",
-        "1", // mono
-        "-ar",
-        "16000", // 16kHz — plenty for speech, keeps the upload small
-        outPath,
-      ]);
-
-      let stderr = "";
-      proc.stderr.on("data", (chunk) => {
-        stderr += chunk.toString();
-      });
-      proc.on("error", (err) => reject(new DeepgramTranscriptionError("Failed to launch ffmpeg", err)));
-      proc.on("close", (code) => {
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(new DeepgramTranscriptionError(`ffmpeg exited with code ${code}: ${stderr.slice(-2000)}`));
-        }
-      });
-    });
-
-    return await readFile(outPath);
-  } finally {
-    await unlink(inPath).catch(() => {});
-    await unlink(outPath).catch(() => {});
-  }
-}
 
 // Sept 15, 2026: language "multi" (rather than a hardcoded "hi" or "en")
 // is Deepgram's documented setting for Hindi-English code-switched speech
@@ -125,8 +61,6 @@ export async function transcribeVideoSpeechViaDeepgram(videoBytes: ArrayBuffer, 
     throw new DeepgramTranscriptionError("DEEPGRAM_API_KEY is not set");
   }
 
-  const wavBytes = await extractAudioToWav(videoBytes, mimeType);
-
   const query = new URLSearchParams({
     model: "nova-3",
     language: "multi",
@@ -140,18 +74,18 @@ export async function transcribeVideoSpeechViaDeepgram(videoBytes: ArrayBuffer, 
       method: "POST",
       headers: {
         Authorization: `Token ${apiKey}`,
-        "Content-Type": "audio/wav",
+        "Content-Type": mimeType,
       },
       // fetch's TS signature comes from the "dom" lib (tsconfig.json's
       // `lib` array), whose BodyInit type doesn't structurally accept
       // @types/node's newer generic `Buffer<ArrayBufferLike>` even though
       // it's a real ArrayBufferView at runtime — wrapping in a plain
-      // Uint8Array satisfies the DOM type exactly, at the cost of one small
-      // copy (this file's audio is already small after extraction).
-      body: new Uint8Array(wavBytes),
-      // Audio-only upload, already downmixed and small — no need for the
-      // long timeouts the direct-video Gemini calls need.
-      signal: AbortSignal.timeout(60_000),
+      // Uint8Array satisfies the DOM type exactly.
+      body: new Uint8Array(videoBytes),
+      // Sending the full video now (not a small extracted audio track), so
+      // this gets a longer allowance than a typical fast AI call — still
+      // comfortably inside this route's own 300s maxDuration.
+      signal: AbortSignal.timeout(120_000),
     });
   } catch (err) {
     throw new DeepgramTranscriptionError("Deepgram request failed (network/timeout)", err);
