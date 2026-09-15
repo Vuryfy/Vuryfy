@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { runQuickCheck, normalizeClaim, ENGINE_VERSION, type QuickCheckResult } from "@/lib/quick-check";
 import { computeCacheKey, getCachedVerification, writeCache, type CachedVerification } from "@/lib/verification-cache";
 import { detectPaymentReceipt } from "@/lib/detect-payment-receipt";
+import { detectPaymentRequest } from "@/lib/detect-payment-request";
 
 // Quick Check — Sprint 1 scope: text + link input only (per the locked
 // build order — QR/image/audio/video come one at a time after this).
@@ -98,6 +99,33 @@ export async function POST(request: Request) {
       type: "payment_receipt",
       claim,
       receipt,
+      credits: {
+        quick_checks: balance?.quick_checks_remaining ?? 0,
+        deep_investigations: balance?.deep_investigations_remaining ?? 0,
+        total: (balance?.quick_checks_remaining ?? 0) + (balance?.deep_investigations_remaining ?? 0),
+      },
+    });
+  }
+
+  // Payment-REQUEST carve-out (Sept 15, 2026, see lib/detect-payment-
+  // request.ts): a different shape from a receipt — a "scan to pay"
+  // identity card (name + UPI ID, no completed transaction) rather than a
+  // completed-payment confirmation. Same underlying reason to short-
+  // circuit: no way to confirm who controls a UPI ID from a web search.
+  const paymentRequest = detectPaymentRequest(claim);
+  if (paymentRequest) {
+    const { data: balance } = await admin
+      .from("credit_balances")
+      .select("quick_checks_remaining, deep_investigations_remaining")
+      .eq("user_id", user.id)
+      .single();
+
+    return NextResponse.json({
+      id: null,
+      mode: "quick",
+      type: "payment_request",
+      claim,
+      payment_request: paymentRequest,
       credits: {
         quick_checks: balance?.quick_checks_remaining ?? 0,
         deep_investigations: balance?.deep_investigations_remaining ?? 0,
